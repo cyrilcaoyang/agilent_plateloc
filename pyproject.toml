@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "agilent-plateloc"
+version = "0.1.0"
+description = "Python driver for the Agilent PlateLoc Thermal Microplate Sealer"
+readme = "README.md"
+requires-python = ">=3.10"
+license = {text = "MIT"}
+dependencies = [
+    "pyserial>=3.5",
+    "pywin32>=306",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest",
+    "pdfplumber",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
