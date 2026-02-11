@@ -1,0 +1,25 @@
+# ── Agilent PlateLoc Configuration ──────────────────────────────────
+# Copy this file to config.toml and edit to match your hardware setup:
+#   cp config.example.toml config.toml
+#
+# config.toml is gitignored — your local settings stay on your machine.
+
+[instrument]
+com_port = "COM14"                          # Serial port the PlateLoc is on
+profile = "default"                         # Profile name created in Diagnostics dialog
+
+[activex]
+progid = "PLATELOC.PlateLocCtrl.2"          # ActiveX ProgID for the PlateLoc control
+typelib_clsid = "{19D95F7D-D76D-4B5B-B665-68C92511ADCF}"   # Type library CLSID
+typelib_major = 1                           # Type library major version
+typelib_minor = 0                           # Type library minor version
+
+[film]
+# Name or product_number of the seal film (see film_settings.json)
+seal_name = "Peelable Aluminum"
+# Plate material key under microplate_compatibility
+# e.g. cyclic_olefin_copolymer | polypropylene | polystyrene
+plate_material = "polypropylene"
+# Control how strictly the demo waits for temperature
+temperature_tolerance_c = 2
+heat_timeout_s = 120

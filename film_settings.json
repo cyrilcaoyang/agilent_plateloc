@@ -1,0 +1,149 @@
+{
+  "seal_films": [
+    {
+      "name": "Peelable Aluminum",
+      "product_number": "24210-001",
+      "adhesion": "Peelable",
+      "applications": [
+        "Compound storage, low temp (0 \u00b0C to \u201380 \u00b0C)",
+        "PCR"
+      ],
+      "dimensions": {
+        "core_diameter": "76.2 mm (3\") ID",
+        "length_of_roll": "457.2 m (1500 ft)",
+        "length_used_per_plate": "78 mm (3.07\")",
+        "plates_per_roll_min": 5000,
+        "roll_diameter": "241.3 mm (9.5\")",
+        "thickness": "0.0591 mm (0.002\")",
+        "width": "115 mm (4.53\")"
+      },
+      "microplate_compatibility": {
+        "cyclic_olefin_copolymer": { "temperature": "190 \u00b0C", "time": "2.5 sec" },
+        "polypropylene": { "temperature": "170 \u00b0C", "time": "1.2 sec" },
+        "polystyrene": { "temperature": "185 \u00b0C", "time": "1.2 sec" }
+      }
+    },
+    {
+      "name": "Peelable Aluminum RT",
+      "product_number": "24214-001",
+      "adhesion": "Peelable",
+      "applications": [
+        "Compound storage, low temp (0 \u00b0C to \u201380 \u00b0C)",
+        "Compound storage, room temp (0 \u00b0C to +40 \u00b0C)**",
+        "PCR"
+      ],
+      "dimensions": {
+        "core_diameter": "76.2 mm (3\") ID",
+        "length_of_roll": "457.2 m (1500 ft)",
+        "length_used_per_plate": "78 mm (3.07\")",
+        "plates_per_roll_min": 5000,
+        "roll_diameter": "255 mm (10.04\")",
+        "thickness": "0.0700 mm (0.0028\")",
+        "width": "115 mm (4.53\")"
+      },
+      "microplate_compatibility": {
+        "cyclic_olefin_copolymer": { "temperature": "185 \u00b0C", "time": "1.5 sec" },
+        "polypropylene": { "temperature": "175 \u00b0C", "time": "1.5 sec" },
+        "polystyrene": "Not Compatible"
+      }
+    },
+    {
+      "name": "Pierceable Aluminum",
+      "product_number": "06644-001",
+      "adhesion": "Permanent",
+      "applications": [
+        "PCR"
+      ],
+      "dimensions": {
+        "core_diameter": "76.2 mm (3\") ID",
+        "length_of_roll": "500 m (1640 ft)",
+        "length_used_per_plate": "78 mm (3.07\")",
+        "plates_per_roll_min": 5000,
+        "roll_diameter": "160 mm (6.3\")",
+        "thickness": "0.025 mm (0.00098\")",
+        "width": "115 mm (4.53\")"
+      },
+      "microplate_compatibility": {
+        "cyclic_olefin_copolymer": null,
+        "polypropylene": { "temperature": "170 \u00b0C", "time": "1.2 sec", "note": "Best Results with Polypropylene" },
+        "polystyrene": "No Data Available"
+      }
+    },
+    {
+      "name": "Clear Peelable Seal",
+      "product_number": "16985-001",
+      "adhesion": "Peelable",
+      "applications": [
+        "Compound storage, low temp (0 \u00b0C to \u201380 \u00b0C) \u2013 Short Term (Hours to daily) only",
+        "PCR",
+        "PCR/qPCR",
+        "Optically clear for qPCR"
+      ],
+      "dimensions": {
+        "core_diameter": "76.2 mm (3\") ID",
+        "length_of_roll": "200 m (656 ft)",
+        "length_used_per_plate": "78 mm (3.07\")",
+        "plates_per_roll_min": 2000,
+        "roll_diameter": "203.2 mm (8\")",
+        "thickness": "0.125 mm (0.005\")",
+        "width": "115 mm (4.53\")"
+      },
+      "microplate_compatibility": {
+        "cyclic_olefin_copolymer": null,
+        "polypropylene": { "temperature": "110 \u00b0C", "time": "1\u20131.2 sec" },
+        "polystyrene": "No Data Available"
+      }
+    },
+    {
+      "name": "Clear Pierceable Thin Seal",
+      "product_number": "17318-001",
+      "adhesion": "Peelable",
+      "applications": [
+        "Compound storage, low temp (0 \u00b0C to \u201380 \u00b0C) \u2013 Short Term (Hours to daily) only",
+        "Sanger DNA sequencing (for example, ABI 3730)",
+        "PCR",
+        "PCR/qPCR",
+        "Optically clear for qPCR"
+      ],
+      "dimensions": {
+        "core_diameter": "76.2 mm (3\") ID",
+        "length_of_roll": "370 m (1213 ft)",
+        "length_used_per_plate": "78 mm (3.07\")",
+        "plates_per_roll_min": 4700,
+        "roll_diameter": "203.2 mm (8\")",
+        "thickness": "0.0762 mm (0.003\")",
+        "width": "115 mm (4.53\")"
+      },
+      "microplate_compatibility": {
+        "cyclic_olefin_copolymer": null,
+        "polypropylene": { "temperature": "110 \u00b0C", "time": "1\u20131.2 sec" },
+        "polystyrene": "No Data Available"
+      }
+    },
+    {
+      "name": "Clear Permanent Seal",
+      "product_number": "24212-001",
+      "adhesion": "Permanent",
+      "applications": [
+        "Sanger DNA sequencing (for example, ABI 3730)",
+        "PCR",
+        "Optically clear for qPCR"
+      ],
+      "dimensions": {
+        "core_diameter": "76.2 mm (3\") ID",
+        "length_of_roll": "500 m (1640 ft)",
+        "length_used_per_plate": "78 mm (3.07\")",
+        "plates_per_roll_min": 5000,
+        "roll_diameter": "208 mm (8.2\")",
+        "thickness": "0.049 mm (0.002\")",
+        "width": "115 mm (4.53\")"
+      },
+      "microplate_compatibility": {
+        "cyclic_olefin_copolymer": null,
+        "polypropylene": { "temperature": "175 \u00b0C", "time": "1.2\u20132 sec", "note": "Permanent" },
+        "polystyrene": null
+      }
+    }
+  ]
+}
+

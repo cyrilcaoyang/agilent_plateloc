@@ -33,6 +33,7 @@ def main():
     import pythoncom
     import win32api
     import win32com.client
+    import win32com.client.gencache
     import win32con
     import win32gui
 
@@ -73,6 +74,9 @@ def main():
     plateloc = None
     hwnd_ax = None
     progid = "PLATELOC.PlateLocCtrl.2"
+    typelib_clsid = "{19D95F7D-D76D-4B5B-B665-68C92511ADCF}"
+    typelib_major = 1
+    typelib_minor = 0
 
     # Request queue: background stdin reader → main thread
     req_queue: queue.Queue = queue.Queue()
@@ -82,15 +86,23 @@ def main():
     # Request handler (runs on the main/STA thread)
     # ------------------------------------------------------------------
     def handle(request: dict) -> dict:
-        nonlocal plateloc, hwnd_ax, progid
+        nonlocal plateloc, hwnd_ax, progid, typelib_clsid, typelib_major, typelib_minor
         cmd = request.get("cmd", "")
         args = request.get("args", [])
 
         try:
             # -- lifecycle ---
             if cmd == "create":
+                # args: [progid, typelib_clsid, typelib_major, typelib_minor]
                 if args:
                     progid = args[0]
+                if len(args) > 1 and args[1]:
+                    typelib_clsid = args[1]
+                if len(args) > 2 and args[2] is not None:
+                    typelib_major = int(args[2])
+                if len(args) > 3 and args[3] is not None:
+                    typelib_minor = int(args[3])
+
                 hwnd_ax = win32gui.CreateWindow(
                     "AtlAxWin", progid,
                     win32con.WS_CHILD,
@@ -106,11 +118,34 @@ def main():
                 idisp = pythoncom.ObjectFromAddress(
                     punk.value, pythoncom.IID_IDispatch,
                 )
-                plateloc = win32com.client.Dispatch(idisp)
+                # Use early-bound wrapper so ByRef output params work
+                # (GetCycleCount, GetActualTemperature, etc.)
+                try:
+                    win32com.client.gencache.EnsureModule(
+                        typelib_clsid, 0, typelib_major, typelib_minor,
+                    )
+                    plateloc = win32com.client.CastTo(
+                        win32com.client.Dispatch(idisp), '_DPlateLoc',
+                    )
+                except Exception:
+                    # Fall back to late-bound if gencache fails
+                    plateloc = win32com.client.Dispatch(idisp)
                 return {"ok": True, "result": f"Created {progid}"}
 
             if plateloc is None:
                 return {"ok": False, "error": "COM object not created yet"}
+
+            # Helper: the underlying OLE object for InvokeTypes calls.
+            # Several PlateLoc methods use ByRef parameters; late-bound
+            # Dispatch cannot infer the types, so we call InvokeTypes
+            # directly with the type codes from the generated type library.
+            #
+            # Type constants (from the .tlb / makepy output):
+            #   VT_I2    = 2      VT_I4    = 3      VT_R4  = 5
+            #   VT_BSTR  = 8      VT_BOOL  = 11     VT_VARIANT = 12
+            #   VT_BYREF = 0x4000 (16384)
+            ole = plateloc._oleobj_
+            CYCNT   = 0  # LCID
 
             # -- properties ---
             if cmd == "set_blocking":
@@ -120,80 +155,117 @@ def main():
             # -- init / close ---
             if cmd == "initialize":
                 profile = args[0] if args else "default"
-                res = plateloc.Initialize(profile)
+                # dispid 3, returns VT_I4, param VT_BSTR
+                res = ole.InvokeTypes(3, CYCNT, 1, (3, 0), ((8, 0),), profile)
                 return {"ok": True, "result": res}
 
             if cmd == "close":
-                res = plateloc.Close()
+                # dispid 4, returns VT_I4, no params
+                res = ole.InvokeTypes(4, CYCNT, 1, (3, 0), ())
                 return {"ok": True, "result": res}
 
             # -- profiles ---
             if cmd == "enumerate_profiles":
+                # dispid 18, returns VT_VARIANT
                 profiles = plateloc.EnumerateProfiles()
                 return {"ok": True, "result": list(profiles) if profiles else []}
 
-            # -- temperature ---
+            # -- temperature (ByRef VT_I2 = 16386) ---
+            # InvokeTypes with ByRef returns (hresult, byref_value)
             if cmd == "get_actual_temperature":
-                return {"ok": True, "result": plateloc.GetActualTemperature()}
+                # dispid 5, returns VT_I4, param ByRef VT_I2
+                res = ole.InvokeTypes(5, CYCNT, 1, (3, 0), ((16386, 0),), 0)
+                return {"ok": True, "result": res[1] if isinstance(res, (list, tuple)) else res}
 
             if cmd == "get_sealing_temperature":
-                return {"ok": True, "result": plateloc.GetSealingTemperature()}
+                # dispid 6, returns VT_I4, param ByRef VT_I2
+                res = ole.InvokeTypes(6, CYCNT, 1, (3, 0), ((16386, 0),), 0)
+                return {"ok": True, "result": res[1] if isinstance(res, (list, tuple)) else res}
 
             if cmd == "set_sealing_temperature":
-                return {"ok": True, "result": plateloc.SetSealingTemperature(int(args[0]))}
+                # dispid 7, returns VT_I4, param ByRef VT_I2
+                res = ole.InvokeTypes(7, CYCNT, 1, (3, 0), ((16386, 0),), int(args[0]))
+                return {"ok": True, "result": res[0] if isinstance(res, (list, tuple)) else res}
 
-            # -- sealing time ---
+            # -- sealing time (ByRef VT_R8 = 16389) ---
             if cmd == "get_sealing_time":
-                return {"ok": True, "result": plateloc.GetSealingTime()}
+                # dispid 8, returns VT_I4, param ByRef VT_R8
+                res = ole.InvokeTypes(8, CYCNT, 1, (3, 0), ((16389, 0),), 0.0)
+                return {"ok": True, "result": res[1] if isinstance(res, (list, tuple)) else res}
 
             if cmd == "set_sealing_time":
-                return {"ok": True, "result": plateloc.SetSealingTime(float(args[0]))}
+                # dispid 9, returns VT_I4, param ByRef VT_R8
+                res = ole.InvokeTypes(9, CYCNT, 1, (3, 0), ((16389, 0),), float(args[0]))
+                return {"ok": True, "result": res[0] if isinstance(res, (list, tuple)) else res}
 
             # -- cycle control ---
             if cmd == "start_cycle":
-                return {"ok": True, "result": plateloc.StartCycle()}
+                # dispid 10
+                res = ole.InvokeTypes(10, CYCNT, 1, (3, 0), ())
+                return {"ok": True, "result": res}
 
             if cmd == "stop_cycle":
-                return {"ok": True, "result": plateloc.StopCycle()}
+                # dispid 11
+                res = ole.InvokeTypes(11, CYCNT, 1, (3, 0), ())
+                return {"ok": True, "result": res}
 
             if cmd == "apply_seal":
-                return {"ok": True, "result": plateloc.ApplySeal()}
+                # dispid 24
+                res = ole.InvokeTypes(24, CYCNT, 1, (3, 0), ())
+                return {"ok": True, "result": res}
 
             # -- stage ---
             if cmd == "move_stage_in":
-                return {"ok": True, "result": plateloc.MoveStageIn()}
+                # dispid 23
+                res = ole.InvokeTypes(23, CYCNT, 1, (3, 0), ())
+                return {"ok": True, "result": res}
 
             if cmd == "move_stage_out":
-                return {"ok": True, "result": plateloc.MoveStageOut()}
+                # dispid 22
+                res = ole.InvokeTypes(22, CYCNT, 1, (3, 0), ())
+                return {"ok": True, "result": res}
 
             # -- error handling ---
             if cmd == "abort":
-                return {"ok": True, "result": plateloc.Abort()}
+                # dispid 19
+                res = ole.InvokeTypes(19, CYCNT, 1, (3, 0), ())
+                return {"ok": True, "result": res}
 
             if cmd == "retry":
-                return {"ok": True, "result": plateloc.Retry()}
+                # dispid 20
+                res = ole.InvokeTypes(20, CYCNT, 1, (3, 0), ())
+                return {"ok": True, "result": res}
 
             if cmd == "ignore":
-                return {"ok": True, "result": plateloc.Ignore()}
+                # dispid 21
+                res = ole.InvokeTypes(21, CYCNT, 1, (3, 0), ())
+                return {"ok": True, "result": res}
 
             # -- info ---
             if cmd == "get_firmware_version":
-                return {"ok": True, "result": plateloc.GetFirmwareVersion()}
+                # dispid 16, returns VT_BSTR
+                return {"ok": True, "result": ole.InvokeTypes(16, CYCNT, 1, (8, 0), ())}
 
             if cmd == "get_version":
-                return {"ok": True, "result": plateloc.GetVersion()}
+                # dispid 15, returns VT_BSTR
+                return {"ok": True, "result": ole.InvokeTypes(15, CYCNT, 1, (8, 0), ())}
 
             if cmd == "get_last_error":
-                return {"ok": True, "result": plateloc.GetLastError()}
+                # dispid 12, returns VT_BSTR
+                return {"ok": True, "result": ole.InvokeTypes(12, CYCNT, 1, (8, 0), ())}
 
             if cmd == "get_cycle_count":
-                return {"ok": True, "result": plateloc.GetCycleCount()}
+                # dispid 17, returns VT_I4, param ByRef VT_I4 (16387)
+                res = ole.InvokeTypes(17, CYCNT, 1, (3, 0), ((16387, 0),), 0)
+                return {"ok": True, "result": res[1] if isinstance(res, (list, tuple)) else res}
 
             # -- UI ---
             if cmd == "show_diags_dialog":
                 modal = bool(args[0]) if args else True
                 sec = int(args[1]) if len(args) > 1 else 0
-                return {"ok": True, "result": plateloc.ShowDiagsDialog(modal, sec)}
+                # dispid 14, params VT_BOOL + VT_I2
+                res = ole.InvokeTypes(14, CYCNT, 1, (3, 0), ((11, 0), (2, 0)), modal, sec)
+                return {"ok": True, "result": res}
 
             # -- housekeeping ---
             if cmd == "ping":

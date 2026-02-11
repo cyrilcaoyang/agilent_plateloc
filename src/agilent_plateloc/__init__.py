@@ -7,12 +7,15 @@ Control the PlateLoc Sealer via its VWorks ActiveX COM interface from Python.
 The ActiveX DLL is 32-bit, so this package uses a 32-bit COM surrogate
 subprocess to bridge the gap when running under 64-bit Python.
 
+All instrument-specific values (COM port, profile name, ActiveX ProgID,
+type library CLSID, sealing defaults) are read from ``config.toml``.
+
 Usage::
 
     from agilent_plateloc import PlateLoc
 
-    sealer = PlateLoc(com_port="COM14")
-    sealer.connect(profile="default")
+    sealer = PlateLoc()                   # reads com_port from config.toml
+    sealer.connect()                      # reads profile from config.toml
     sealer.set_sealing_temperature(170)
     sealer.set_sealing_time(3.0)
     sealer.start_cycle()

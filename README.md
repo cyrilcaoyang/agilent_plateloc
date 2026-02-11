@@ -8,7 +8,7 @@ Python driver for the **Agilent PlateLoc Thermal Microplate Sealer**, communicat
 - **Python 3.10+**
 - **Agilent VWorks ActiveX Controls** installed (from the Agilent software CD/UFD)
 - **32-bit Python** installed alongside your main Python (the ActiveX DLL is 32-bit — see [32-bit note](#32-bit-python-requirement) below)
-- PlateLoc connected via **RS-232 serial** (this project uses **COM14**)
+- PlateLoc connected via **RS-232 serial** (e.g. COM14 — set in `config.toml`)
 
 ## Installation
 
@@ -21,7 +21,11 @@ Python driver for the **Agilent PlateLoc Thermal Microplate Sealer**, communicat
 powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
 
 # Clone / navigate to the project
-cd C:\Users\SDL2\Projects\agilent_plateloc
+cd path\to\agilent_plateloc
+
+# Copy the example config and edit for your setup
+copy config.example.toml config.toml
+# Edit config.toml — set com_port, profile name, etc.
 
 # Create a virtual environment with Python 3.10 and install with dev deps
 uv venv .venv --python 3.10
@@ -74,7 +78,7 @@ winget install Python.Python.3.10 --architecture x86
 The driver auto-detects 32-bit Python via the `py` launcher (`py -3-32`). You can also pass the path explicitly:
 
 ```python
-sealer = PlateLoc(com_port="COM14", python32_path=r"C:\Python310-32\python.exe")
+sealer = PlateLoc(python32_path=r"C:\Python310-32\python.exe")
 ```
 
 ## First-Time Profile Setup (Administrator Required)
@@ -87,10 +91,10 @@ You **must run as Administrator** the first time to create / edit a profile.
 #   • Press Win+X → select "Windows Terminal (Admin)" or "PowerShell (Admin)"
 #   • Or: press Win, type "powershell", right-click → "Run as administrator"
 
-cd C:\Users\SDL2\Projects\agilent_plateloc
+cd path\to\agilent_plateloc
 .venv\Scripts\python.exe -c "
 from agilent_plateloc import PlateLoc
-s = PlateLoc(com_port='COM14')
+s = PlateLoc()          # uses com_port from config.toml
 s._create_com_object()
 s.show_diags_dialog(modal=True, security_level=0)
 s.close()
@@ -100,7 +104,7 @@ s.close()
 In the Diagnostics dialog:
 
 1. Go to the **Profiles** tab
-2. Click **Create a new profile** and give it a name (e.g. `SDL2_PlateLoc`)
+2. Click **Create a new profile** and give it a name (e.g. `MyPlateLoc`)
 3. Set **Serial port** to **COM14**
 4. Configure startup values (temperature, seal time, etc.)
 5. Click **Update this profile** to save
@@ -116,8 +120,8 @@ After a profile exists:
 ```python
 from agilent_plateloc import PlateLoc
 
-with PlateLoc(com_port="COM14") as sealer:
-    sealer.connect(profile="my_profile")
+with PlateLoc() as sealer:           # reads com_port from config.toml
+    sealer.connect()                  # reads profile from config.toml
 
     # Configure
     sealer.set_sealing_temperature(170)   # 20–235 °C
@@ -187,12 +191,14 @@ with PlateLoc(com_port="COM14") as sealer:
 agilent_plateloc/
 ├── README.md
 ├── pyproject.toml
-├── docs/
-│   └── VWorks ActiveX Controls 13.1.9 Release Notes.pdf
+├── config.example.toml          # Template — copy to config.toml
+├── config.toml                  # Your local settings (gitignored)
+├── demo.py                      # Demonstration script
 └── src/
     └── agilent_plateloc/
-        ├── __init__.py          # Package entry point, exports PlateLoc
+        ├── __init__.py          # Package entry point
         ├── plateloc.py          # Main driver class
+        ├── config.py            # Config loader (reads config.toml)
         └── _com_server.py       # 32-bit COM surrogate (internal)
 ```
 
@@ -230,3 +236,69 @@ The ActiveX control cannot open the serial port. Check:
    Get-Process python* | Stop-Process -Force
    ```
 3. **COM port is correct** in the profile — verify in Device Manager (Ports → COM & LPT) and re-open the Diagnostics dialog as Administrator to fix if needed
+
+## Configuration
+
+All instrument-specific settings live in `config.toml` (gitignored).  
+Copy the template and edit:
+
+```powershell
+copy config.example.toml config.toml
+```
+
+See `config.example.toml` for all available keys and their defaults.
+
+### Film-specific sealing settings
+
+Different sealing films and plate materials require different temperature / time settings.  
+These are defined separately in `film_settings.json`, using data derived from Agilent’s film selection guide (for example, document `5990-3659EN` on Agilent’s site, such as [`https://www.agilent.com/cs/library/selectionguide/public/5990-3659en_lo%20CMS.pdf`](https://www.agilent.com/cs/library/selectionguide/public/5990-3659en_lo%20CMS.pdf)).
+
+The structure looks like:
+
+```json
+{
+  "seal_films": [
+    {
+      "name": "Peelable Aluminum",
+      "product_number": "24210-001",
+      "microplate_compatibility": {
+        "cyclic_olefin_copolymer": { "temperature": "190 °C", "time": "2.5 sec" },
+        "polypropylene":          { "temperature": "170 °C", "time": "1.2 sec" },
+        "polystyrene":            { "temperature": "185 °C", "time": "1.2 sec" }
+      }
+    }
+  ]
+}
+```
+
+In `config.toml` you select both the **seal film** and **plate material**:
+
+```toml
+[film]
+seal_name = "Peelable Aluminum"   # or product_number, e.g. "24210-001"
+plate_material = "polypropylene"  # cyclic_olefin_copolymer | polypropylene | polystyrene
+temperature_tolerance_c = 2
+heat_timeout_s = 120
+```
+
+The demo script converts the selected film + plate material into numeric `temperature_c` and `time_s` and then uses those values to configure the PlateLoc.
+
+## Legal / Licensing
+
+- **Intended use**: This package is provided for **research and internal evaluation only**.  
+  For any **commercial** or regulated use, you must contact **Agilent Technologies** to obtain appropriate licenses and approvals.
+- **ActiveX software**: The PlateLoc **ActiveX / VWorks controls are proprietary Agilent software** and **must be obtained and licensed from Agilent**.  
+  This project does **not** distribute those components and is not a replacement for any Agilent license.
+- **No affiliation**: This project is an **independent, unofficial** integration helper and is **not affiliated with, endorsed by, or supported by Agilent Technologies**.
+- **No warranty / misuse**: The author provides this software **“as is”, without warranty of any kind** and **waives any responsibility for damage, injury, or misuse** arising from its use.  
+  You are solely responsible for ensuring safe operation of equipment and compliance with all applicable laws, regulations, and vendor licenses.
+
+### Open‑source license choice
+
+The project currently uses the **MIT License**, which is a simple, permissive license that:
+
+- Allows others to use, modify, and redistribute the code (including commercially),
+- While including a strong **“no warranty / no liability”** clause that matches the disclaimer above.
+
+If you want to stay open‑source, **MIT is a good fit here**.  
+If you instead want to **legally forbid commercial use of *this driver itself***, you would need a **custom non‑commercial license**, which would no longer be an OSI‑approved open‑source license.

@@ -32,8 +32,15 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
+from . import config as _config
+
 # Default ProgID for the PlateLoc ActiveX control
-_PROGID = "PLATELOC.PlateLocCtrl.2"
+_PROGID = _config.get("activex", "progid", "PLATELOC.PlateLocCtrl.2")
+
+# Type library identifiers (used for early-bound COM wrappers)
+_TYPELIB_CLSID = _config.get("activex", "typelib_clsid", "{19D95F7D-D76D-4B5B-B665-68C92511ADCF}")
+_TYPELIB_MAJOR = _config.get("activex", "typelib_major", 1)
+_TYPELIB_MINOR = _config.get("activex", "typelib_minor", 0)
 
 # Common 32-bit Python locations on Windows
 _PYTHON32_CANDIDATES = [
@@ -109,12 +116,12 @@ class PlateLoc:
 
     def __init__(
         self,
-        com_port: str = "COM14",
+        com_port: str | None = None,
         progid: str = _PROGID,
         python32_path: str | None = None,
         blocking: bool = True,
     ):
-        self.com_port = com_port
+        self.com_port = com_port or _config.get("instrument", "com_port", "COM14")
         self.progid = progid
         self.python32_path = python32_path
         self.blocking = blocking
@@ -129,7 +136,7 @@ class PlateLoc:
     # Connection
     # ------------------------------------------------------------------
 
-    def connect(self, profile: str = "default") -> None:
+    def connect(self, profile: str | None = None) -> None:
         """
         Connect to the PlateLoc Sealer.
 
@@ -138,12 +145,15 @@ class PlateLoc:
 
         Parameters
         ----------
-        profile : str
+        profile : str or None
             The profile name configured in the PlateLoc Diagnostics
             dialog. The profile contains the COM port setting.
+            If ``None``, reads from ``config.toml`` (``instrument.profile``).
             Use :meth:`enumerate_profiles` or :meth:`show_diags_dialog`
             to configure profiles.
         """
+        if profile is None:
+            profile = _config.get("instrument", "profile", "default")
         self._create_com_object()
 
         # Set blocking mode
@@ -576,7 +586,17 @@ class PlateLoc:
             idisp = pythoncom.ObjectFromAddress(
                 punk.value, pythoncom.IID_IDispatch,
             )
-            self._com_obj = win32com.client.Dispatch(idisp)
+            # Use early-bound wrapper for correct ByRef param handling
+            try:
+                import win32com.client.gencache
+                win32com.client.gencache.EnsureModule(
+                    _TYPELIB_CLSID, 0, _TYPELIB_MAJOR, _TYPELIB_MINOR,
+                )
+                self._com_obj = win32com.client.CastTo(
+                    win32com.client.Dispatch(idisp), '_DPlateLoc',
+                )
+            except Exception:
+                self._com_obj = win32com.client.Dispatch(idisp)
 
         except PlateLocError:
             raise
@@ -618,8 +638,11 @@ class PlateLoc:
         self._mode = "surrogate"
         logger.info("32-bit surrogate started (pid=%d)", self._proc.pid)
 
-        # Create the COM object in the surrogate
-        resp = self._send_surrogate({"cmd": "create", "args": [self.progid]})
+        # Create the COM object in the surrogate, passing typelib info for early binding
+        resp = self._send_surrogate({
+            "cmd": "create",
+            "args": [self.progid, _TYPELIB_CLSID, _TYPELIB_MAJOR, _TYPELIB_MINOR],
+        })
         if not resp.get("ok"):
             raise PlateLocError(f"Failed to create COM object: {resp.get('error')}")
 

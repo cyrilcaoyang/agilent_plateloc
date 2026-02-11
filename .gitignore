@@ -1,0 +1,28 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+*.egg
+
+# Virtual environments
+.venv/
+venv/
+
+# Machine-specific config (use config.example.toml as template)
+config.toml
+
+# IDE
+.vscode/
+.idea/
+*.suo
+*.user
+
+# Vendor docs (potentially copyrighted — keep local only)
+docs/
+
+# OS
+Thumbs.db
+Desktop.ini
+.DS_Store
