@@ -1,6 +1,0 @@
-pyserial>=3.5
-pywin32>=306
-
-[dev]
-pytest
-pdfplumber
