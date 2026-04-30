@@ -22,7 +22,7 @@ from agilent_plateloc.config import (
 
 # ── Configuration (loaded from config.toml) ────────────────────────
 PROFILE   = cfg("instrument", "profile",  "default")
-COM_PORT  = cfg("instrument", "com_port", "COM14")
+COM_PORT  = cfg("instrument", "com_port", "COM4")
 DEF_SEAL_NAME = cfg("film", "seal_name", "Peelable Aluminum")
 DEF_PLATE_MATERIAL = cfg("film", "plate_material", "polypropylene")
 TEMP_TOL_C  = int(cfg("film", "temperature_tolerance_c", 2))
@@ -111,6 +111,103 @@ def _choose_film_and_material() -> tuple[str, str]:
     return film_name, plate_material
 
 
+def _prompt_int_setting(label: str, default: int, min_value: int, max_value: int) -> int:
+    """Prompt for an integer setting, using default on blank input."""
+    while True:
+        raw = input(
+            f"{label} [{min_value}-{max_value}] (default {default}): "
+        ).strip()
+        if not raw:
+            return default
+
+        try:
+            value = int(raw)
+        except ValueError:
+            print("Please enter a whole number.")
+            continue
+
+        if min_value <= value <= max_value:
+            return value
+        print(f"Please enter a value from {min_value} to {max_value}.")
+
+
+def _prompt_float_setting(
+    label: str,
+    default: float,
+    min_value: float,
+    max_value: float,
+) -> float:
+    """Prompt for a floating-point setting, using default on blank input."""
+    while True:
+        raw = input(
+            f"{label} [{min_value:.1f}-{max_value:.1f}] "
+            f"(default {default:.1f}): "
+        ).strip()
+        if not raw:
+            return default
+
+        try:
+            value = float(raw)
+        except ValueError:
+            print("Please enter a number.")
+            continue
+
+        if min_value <= value <= max_value:
+            return value
+        print(f"Please enter a value from {min_value:.1f} to {max_value:.1f}.")
+
+
+def _customize_seal_params(default_temp_c: int, default_time_s: float) -> tuple[int, float]:
+    """Allow operator override of film-derived sealing parameters."""
+    print()
+    print("=" * 50)
+    print("Seal parameters")
+    print("=" * 50)
+    print(f"Recommended temperature : {default_temp_c} C")
+    print(f"Recommended seal time   : {default_time_s:.1f} s")
+    print("Press ENTER to use each recommended value, or type a custom value.")
+    print()
+
+    seal_temp_c = _prompt_int_setting("Sealing temperature (C)", default_temp_c, 20, 235)
+    seal_time_s = _prompt_float_setting("Sealing time (s)", default_time_s, 0.5, 12.0)
+    return seal_temp_c, seal_time_s
+
+
+def _wait_for_temperature_ready(sealer: PlateLoc, target_c: int) -> None:
+    """Block until the plate is within tolerance, or abort before cycling."""
+    log.info(
+        "Waiting for plate to reach %d C (+/- %d C). Press Ctrl+C to abort ...",
+        target_c,
+        TEMP_TOL_C,
+    )
+    try:
+        for _ in range(HEAT_TIMEOUT):
+            act = sealer.get_actual_temperature()
+            delta = act - target_c
+            if abs(delta) <= TEMP_TOL_C:
+                log.info("Plate ready at %d C", act)
+                return
+
+            direction = "cooling" if delta > 0 else "heating"
+            log.info("  %s ... %d C", direction, act)
+            time.sleep(1)
+    except KeyboardInterrupt:
+        log.warning("Temperature wait aborted by operator; seal cycle will not start")
+        sealer.close()
+        raise SystemExit(1) from None
+
+    actual_c = sealer.get_actual_temperature()
+    log.error(
+        "Timed out waiting for plate temperature; seal cycle will not start "
+        "(actual=%d C, target=%d C, tolerance=%d C)",
+        actual_c,
+        target_c,
+        TEMP_TOL_C,
+    )
+    sealer.close()
+    raise SystemExit(1)
+
+
 def main() -> None:
     sealer = PlateLoc(com_port=COM_PORT)
 
@@ -134,8 +231,12 @@ def main() -> None:
     # ── 3. Let user choose seal film / plate material ──────────────
     film_name, plate_material = _choose_film_and_material()
     params = get_seal_params(film_name, plate_material)
-    seal_temp_c = int(params["temperature_c"])
-    seal_time_s = float(params["time_s"])
+    recommended_temp_c = int(params["temperature_c"])
+    recommended_time_s = float(params["time_s"])
+    seal_temp_c, seal_time_s = _customize_seal_params(
+        recommended_temp_c,
+        recommended_time_s,
+    )
 
     log.info(
         "Using film=%r, plate=%r -> temp=%d C, time=%.2f s",
@@ -167,16 +268,7 @@ def main() -> None:
     )
 
     # ── 6. Wait for temperature to stabilise ────────────────────────
-    log.info("Waiting for plate to reach %d C ...", seal_temp_c)
-    for _ in range(HEAT_TIMEOUT):
-        act = sealer.get_actual_temperature()
-        if act >= seal_temp_c - TEMP_TOL_C:
-            log.info("Plate ready at %d C", act)
-            break
-        log.info("  heating ... %d C", act)
-        time.sleep(1)
-    else:
-        log.warning("Timed out waiting for temperature -- proceeding anyway")
+    _wait_for_temperature_ready(sealer, seal_temp_c)
 
     # ── 7. Run a seal cycle ─────────────────────────────────────────
     input("\n>>> Press ENTER to start a seal cycle (load plate first!) <<<\n")

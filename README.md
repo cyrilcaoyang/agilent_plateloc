@@ -62,20 +62,28 @@ pip install agilent-plateloc
 The Agilent `AgilentPlateLoc.dll` ActiveX control is a **32-bit** COM component.  
 If your main Python is 64-bit (which is typical), this driver automatically launches a **32-bit Python subprocess** to host the COM object and communicates with it over JSON pipes — you don't need to change your main Python.
 
-Install a 32-bit Python alongside your main one:
+Install a 32-bit Python alongside your main one, then install `pywin32` into that 32-bit runtime:
 
 ```powershell
-# Option A — Python launcher (recommended)
+# Check which Python runtimes the launcher can see.
+py -0
+
+# This project is currently set up with Python 3.13 (32-bit):
+py -3.13-32 -m pip install pywin32
+py -3.13-32 -c "import win32com.client, pythoncom; print('pywin32 ok')"
+
+# Option A — Python.org installer
 # Download the 32-bit (x86) installer from https://www.python.org/downloads/
 # During install, check "Add to PATH" is OFF (to avoid conflicts)
-# Then install pywin32 into it:
+# Then install pywin32 into it, adjusting the selector to match `py -0`.
+# For example, if `py -0` shows "-V:3.10-32":
 py -3.10-32 -m pip install pywin32
 
 # Option B — winget
 winget install Python.Python.3.10 --architecture x86
 ```
 
-The driver auto-detects 32-bit Python via the `py` launcher (`py -3-32`). You can also pass the path explicitly:
+The exact Python version is less important than the architecture: the PlateLoc ActiveX control requires **32-bit Python with `pywin32` installed**. The driver auto-detects 32-bit Python via the `py` launcher (`py -3-32`). You can also pass the path explicitly:
 
 ```python
 sealer = PlateLoc(python32_path=r"C:\Python310-32\python.exe")
