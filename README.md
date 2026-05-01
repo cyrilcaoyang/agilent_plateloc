@@ -1,6 +1,8 @@
-# Agilent PlateLoc Thermal Microplate Sealer — Python Driver
+# Agilent PlateLoc Thermal Microplate Sealer — Python Driver + REST API
 
-Python driver for the **Agilent PlateLoc Thermal Microplate Sealer**, communicating through the VWorks ActiveX COM control over a serial (COM) port.
+Python driver and REST API service for the **Agilent PlateLoc Thermal Microplate Sealer**, communicating through the VWorks ActiveX COM control over a serial (COM) port.
+
+> **API conformance:** This repo conforms to **lab status spec v1.0** (see `docs/STATUS_SPEC.md` in the [`ac-organic-dashboard`](https://github.com/cyrilcaoyang/ac-organic-dashboard) repo). The dashboard auto-discovers this device by polling its `/status` endpoint.
 
 ## Prerequisites
 
@@ -193,6 +195,118 @@ with PlateLoc() as sealer:           # reads com_port from config.toml
 | `retry()` | Retry last action after error |
 | `ignore_error()` | Ignore last error and proceed |
 
+## REST API
+
+The repo ships a FastAPI service that exposes the driver over HTTP using
+the unified lab equipment status spec (v1.0). The dashboard polls this
+service every 2-3 seconds.
+
+### Run the service
+
+```powershell
+# From an environment that already has the driver deps installed:
+pip install -e ".[api]"           # adds fastapi + uvicorn + pydantic
+
+# Production - reads [service] from config.toml
+agilent-plateloc-serve
+
+# Or as a module (handy when iterating)
+python -m agilent_plateloc
+
+# Force dry-run (no hardware) for development on macOS/Linux
+python -m agilent_plateloc --dry-run --port 8000
+```
+
+Configure host/port/dry-run in `config.toml`:
+
+```toml
+[service]
+host = "0.0.0.0"          # Tailscale-only by ACL
+port = 8000
+dry_run = false           # true = run without ActiveX/COM (CI, dev)
+cors_origins = ["*"]      # tighten if device leaves the Tailnet
+startup_connect_timeout_s = 15.0
+
+[dashboard]
+equipment_id = "plateloc"          # MUST match equipment.yaml in the dashboard
+equipment_name = "Agilent PlateLoc"
+```
+
+### Endpoints
+
+Spec-mandated (always available):
+
+| Method | Path             | Returns                                         |
+|--------|------------------|-------------------------------------------------|
+| GET    | `/`              | `{equipment_id, equipment_name, protocol_version}` |
+| GET    | `/health`        | `{status: "healthy"}`                           |
+| GET    | `/status`        | Full `EquipmentStatus` envelope (always 200)    |
+| GET    | `/openapi.json`  | OpenAPI document (FastAPI auto-generates)       |
+
+Control (optional, useful for an operator UI later):
+
+| Method | Path                          | Body                                          |
+|--------|-------------------------------|-----------------------------------------------|
+| POST   | `/control/startup`            | `{profile?: string}`                          |
+| POST   | `/control/shutdown`           | `{}`                                          |
+| POST   | `/control/seal/temperature`   | `{temperature_c: int}` (20-235)               |
+| POST   | `/control/seal/time`          | `{seconds: float}` (0.5-12.0)                 |
+| POST   | `/control/seal/start`         | `{temperature_c?, seconds?}`                  |
+| POST   | `/control/seal/stop`          | `{}`                                          |
+| POST   | `/control/stage/in`           | `{}`                                          |
+| POST   | `/control/stage/out`          | `{}`                                          |
+
+Control endpoints return **409 Conflict** if the driver isn't connected
+yet (operator should hit `/control/startup` first), **422** for
+out-of-range parameters, and **503** if connect itself fails.
+
+### Quick check
+
+```bash
+# Probe + health
+curl http://plateloc-pc:8000/
+curl http://plateloc-pc:8000/health
+
+# Full status snapshot
+curl http://plateloc-pc:8000/status | jq
+
+# Connect, set parameters, run a cycle
+curl -X POST http://plateloc-pc:8000/control/startup \
+  -H 'Content-Type: application/json' -d '{"profile": "default"}'
+curl -X POST http://plateloc-pc:8000/control/seal/start \
+  -H 'Content-Type: application/json' \
+  -d '{"temperature_c": 170, "seconds": 3.0}'
+```
+
+### Spec conformance notes
+
+* `GET /status` is **side-effect-free** — polling it never moves the
+  stage, never fires a cycle, and never re-initialises the driver.
+* `GET /status` always returns **HTTP 200** when the process is alive.
+  Hardware-not-yet-initialised is reported as
+  `equipment_status: requires_init` with `required_actions: ["startup"]`.
+* The `equipment_id` in `/status` matches the `id` in the dashboard's
+  `equipment.yaml`. Do not change it without coordinating with the
+  dashboard repo.
+* No `equipment_ip` / `equipment_tailscale` self-discovery — the
+  dashboard registry is the single source of truth for "where to reach
+  this device".
+* `models.py` is a verbatim copy of the spec from
+  `ac-organic-dashboard/docs/STATUS_SPEC.md` and will eventually be
+  replaced by `from lab_status_contract import ...`.
+
+Reference snapshots live in `tests/fixtures/status_*.json` covering
+`requires_init`, `ready`, `busy`, and `dry_run`. They are regenerated
+by `pytest` and committed so reviewers can eyeball schema changes.
+
+### Running on the device PC
+
+The PlateLoc PC is a Windows machine on the lab Tailnet. Recommended
+process supervisor: NSSM (or the Windows Task Scheduler with
+`agilent-plateloc-serve` set to "run whether user is logged on or not").
+On Linux for CI/dev, a `systemd` unit pointing at
+`agilent-plateloc-serve --dry-run` is enough.
+
 ## Project Structure
 
 ```
@@ -202,12 +316,24 @@ agilent_plateloc/
 ├── config.example.toml          # Template — copy to config.toml
 ├── config.toml                  # Your local settings (gitignored)
 ├── demo.py                      # Demonstration script
-└── src/
-    └── agilent_plateloc/
-        ├── __init__.py          # Package entry point
-        ├── plateloc.py          # Main driver class
-        ├── config.py            # Config loader (reads config.toml)
-        └── _com_server.py       # 32-bit COM surrogate (internal)
+├── src/
+│   └── agilent_plateloc/
+│       ├── __init__.py          # Package entry point
+│       ├── __main__.py          # CLI: `python -m agilent_plateloc`
+│       ├── plateloc.py          # Main driver class (ActiveX/COM)
+│       ├── _com_server.py       # 32-bit COM surrogate (internal)
+│       ├── config.py            # Config loader (reads config.toml)
+│       ├── models.py            # Lab status spec v1.0 Pydantic models
+│       ├── service.py           # PlateLocService - state + locking + dry-run
+│       └── api.py               # FastAPI app (spec + control endpoints)
+└── tests/
+    ├── conftest.py              # TestClient fixture (dry-run)
+    ├── test_api.py              # Spec conformance tests + fixture writer
+    └── fixtures/
+        ├── status_dry_run.json
+        ├── status_ready.json
+        ├── status_busy.json
+        └── status_requires_init.json
 ```
 
 ## Troubleshooting

@@ -26,4 +26,12 @@ Usage::
 from .plateloc import PlateLoc
 
 __all__ = ["PlateLoc"]
-__version__ = "0.1.0"
+__version__ = "1.0.0"
+
+# The service / FastAPI app live in `agilent_plateloc.service` and
+# `agilent_plateloc.api` and are imported on demand to avoid pulling in
+# FastAPI/uvicorn for callers that only want the driver. Import them
+# explicitly when needed::
+#
+#     from agilent_plateloc.api import create_app
+#     from agilent_plateloc.service import PlateLocService

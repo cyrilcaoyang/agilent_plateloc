@@ -98,6 +98,27 @@ _DEFAULTS: dict[str, Any] = {
         "typelib_major": 1,
         "typelib_minor": 0,
     },
+    # REST API service (`python -m agilent_plateloc`)
+    "service": {
+        "host": "0.0.0.0",
+        "port": 8000,
+        # When true, the service uses an in-memory stub instead of touching
+        # the ActiveX/COM. Useful for development on macOS/Linux and for CI.
+        "dry_run": False,
+        # CORS origins allowed by the API. Defaults to wildcard - this is
+        # safe in v1 because access is gated by Tailscale ACLs, not auth.
+        "cors_origins": ["*"],
+        # If auto-connect at startup hangs (COM/ActiveX edge cases), give up
+        # after this many seconds and leave the service in `requires_init`.
+        "startup_connect_timeout_s": 15.0,
+    },
+    # Identity reported in /status; should match the entry in the dashboard's
+    # `equipment.yaml`. equipment_kind is fixed at "plate_sealer".
+    "dashboard": {
+        "equipment_id": "plateloc",
+        "equipment_name": "Agilent PlateLoc",
+        "equipment_version": None,
+    },
 }
 
 try:

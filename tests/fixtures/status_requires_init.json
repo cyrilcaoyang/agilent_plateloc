@@ -1,0 +1,19 @@
+{
+  "components": {},
+  "details": {},
+  "device_time": "2026-04-29T22:50:01Z",
+  "equipment_id": "plateloc",
+  "equipment_kind": "plate_sealer",
+  "equipment_name": "Agilent PlateLoc",
+  "equipment_status": "requires_init",
+  "equipment_version": null,
+  "host": "plateloc-pc",
+  "last_error": null,
+  "message": "Driver not connected. POST /control/startup to initialize.",
+  "metrics": {},
+  "protocol_version": "1.0",
+  "required_actions": [
+    "startup"
+  ],
+  "uptime_seconds": 0.0
+}
