@@ -1,0 +1,19 @@
+{
+  "seal_types": [
+    {
+      "name": "Agilent Thin Clear Pierceable Film",
+      "plates": [
+        {
+          "name": "8R/12C PP Round Well Spherical Bottom (14mm)",
+          "temperature_c": 130,
+          "time_s": 3.0
+        },
+        {
+          "name": "8R/12C PP Square Well Flat Bottom (19mm)",
+          "temperature_c": 140,
+          "time_s": 6.0
+        }
+      ]
+    }
+  ]
+}

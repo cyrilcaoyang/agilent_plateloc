@@ -112,6 +112,125 @@ def get(section: str, key: str, default: Any = None) -> Any:
 
 
 # ---------------------------------------------------------------------------
+# Operator seal parameters (parameters.json)
+# ---------------------------------------------------------------------------
+
+_PARAMETERS: dict[str, Any] | None = None
+
+
+def _find_parameters_file() -> Path | None:
+    """
+    Locate ``parameters.json`` next to ``config.toml`` or in the CWD.
+    """
+    cfg_path = _find_config_file()
+    if cfg_path is not None:
+        candidate = cfg_path.parent / "parameters.json"
+        if candidate.is_file():
+            return candidate
+    cwd_candidate = Path.cwd() / "parameters.json"
+    if cwd_candidate.is_file():
+        return cwd_candidate
+    return None
+
+
+def load_parameters(path: str | Path | None = None) -> dict[str, Any]:
+    """
+    Load operator-facing sealing parameters from ``parameters.json``.
+
+    The JSON file should contain seal types with exact plate entries, e.g.::
+
+        {
+          "seal_types": [
+            {
+              "name": "Agilent Thin Clear Pierceable Film",
+              "plates": [
+                {
+                  "name": "8R/12C PP Round Well Spherical Bottom (14mm)",
+                  "temperature_c": 130,
+                  "time_s": 3.0
+                }
+              ]
+            }
+          ]
+        }
+    """
+    if path is None:
+        found = _find_parameters_file()
+        if found is None:
+            return {}
+        path = found
+
+    path = Path(path)
+    if not path.is_file():
+        return {}
+
+    with open(path, "r", encoding="utf-8") as f:
+        data = json.load(f)
+    if not isinstance(data, dict):
+        raise ValueError("parameters.json must contain a JSON object at the top level")
+    return data
+
+
+def get_seal_parameters(seal_name: str, plate_name: str) -> dict[str, float]:
+    """
+    Resolve sealing temperature/time for a seal type and exact plate type.
+    """
+    global _PARAMETERS
+
+    if _PARAMETERS is None:
+        _PARAMETERS = load_parameters()
+
+    seal_types = _PARAMETERS.get("seal_types")
+    if not isinstance(seal_types, list):
+        raise ValueError("parameters.json must contain a 'seal_types' list")
+
+    seal_match: dict[str, Any] | None = None
+    for seal_type in seal_types:
+        if not isinstance(seal_type, dict):
+            continue
+        if seal_type.get("name") == seal_name:
+            seal_match = seal_type
+            break
+
+    if seal_match is None:
+        raise ValueError(f"Seal type {seal_name!r} not found in parameters.json")
+
+    plates = seal_match.get("plates")
+    if not isinstance(plates, list):
+        raise ValueError(f"Seal type {seal_name!r} must contain a 'plates' list")
+
+    plate_match: dict[str, Any] | None = None
+    for plate in plates:
+        if not isinstance(plate, dict):
+            continue
+        if plate.get("name") == plate_name:
+            plate_match = plate
+            break
+
+    if plate_match is None:
+        raise ValueError(
+            f"Plate type {plate_name!r} not found for seal type {seal_name!r}"
+        )
+
+    try:
+        temperature_c = float(plate_match["temperature_c"])
+        time_s = float(plate_match["time_s"])
+    except KeyError as exc:
+        raise ValueError(
+            f"Missing {exc.args[0]!r} for seal={seal_name!r}, plate={plate_name!r}"
+        ) from exc
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            f"Invalid temperature/time for seal={seal_name!r}, plate={plate_name!r}"
+        ) from exc
+
+    return {
+        "temperature_c": temperature_c,
+        "time_s": time_s,
+    }
+
+
+# ---------------------------------------------------------------------------
 # Film-specific sealing settings (film_settings.json)
 # ---------------------------------------------------------------------------
 

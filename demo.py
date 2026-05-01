@@ -16,15 +16,13 @@ from agilent_plateloc import PlateLoc
 from agilent_plateloc.plateloc import PlateLocError
 from agilent_plateloc.config import (
     get as cfg,
-    get_seal_params,
-    load_film_settings,
+    get_seal_parameters,
+    load_parameters,
 )
 
 # ── Configuration (loaded from config.toml) ────────────────────────
 PROFILE   = cfg("instrument", "profile",  "default")
 COM_PORT  = cfg("instrument", "com_port", "COM4")
-DEF_SEAL_NAME = cfg("film", "seal_name", "Peelable Aluminum")
-DEF_PLATE_MATERIAL = cfg("film", "plate_material", "polypropylene")
 TEMP_TOL_C  = int(cfg("film", "temperature_tolerance_c", 2))
 HEAT_TIMEOUT = int(cfg("film", "heat_timeout_s", 120))
 # ────────────────────────────────────────────────────────────────────
@@ -36,79 +34,59 @@ logging.basicConfig(
 log = logging.getLogger(__name__)
 
 
-def _choose_film_and_material() -> tuple[str, str]:
-    """Let the user pick a seal film and plate material from film_settings.json."""
-    data = load_film_settings()
-    films = data.get("seal_films") or []
-    if not films:
-        raise SystemExit("No seal_films defined in film_settings.json")
+def _choose_seal_and_plate() -> tuple[str, str]:
+    """Let the user pick a seal type and exact plate type from parameters.json."""
+    data = load_parameters()
+    seal_types = data.get("seal_types") or []
+    if not isinstance(seal_types, list) or not seal_types:
+        raise SystemExit("No seal_types defined in parameters.json")
 
     print()
     print("=" * 50)
-    print("Available seal films:")
-    for idx, film in enumerate(films, start=1):
-        name = film.get("name", "<unnamed>")
-        pn = film.get("product_number", "")
-        label = f"{name}"
-        if pn:
-            label += f" (PN {pn})"
-        print(f"  [{idx}] {label}")
+    print("Available seal types:")
+    for idx, seal_type in enumerate(seal_types, start=1):
+        name = seal_type.get("name", "<unnamed>")
+        print(f"  [{idx}] {name}")
     print("=" * 50)
 
-    # Film selection (by index, default from config)
-    try:
-        default_idx = next(
-            i for i, f in enumerate(films, start=1)
-            if f.get("name") == DEF_SEAL_NAME or f.get("product_number") == DEF_SEAL_NAME
-        )
-    except StopIteration:
-        default_idx = 1
-
-    raw = input(f"Select seal film [1-{len(films)}] (default {default_idx}): ").strip()
+    raw = input(f"Select seal type [1-{len(seal_types)}] (default 1): ").strip()
     if not raw:
-        film_idx = default_idx
+        seal_idx = 1
     else:
-        film_idx = int(raw)
-        if film_idx < 1 or film_idx > len(films):
-            raise SystemExit("Invalid film selection")
+        seal_idx = int(raw)
+        if seal_idx < 1 or seal_idx > len(seal_types):
+            raise SystemExit("Invalid seal type selection")
 
-    film = films[film_idx - 1]
-    film_name = film.get("name") or film.get("product_number")
+    seal_type = seal_types[seal_idx - 1]
+    seal_name = seal_type.get("name")
+    if not isinstance(seal_name, str) or not seal_name:
+        raise SystemExit("Selected seal type is missing a name")
 
-    # Plate material selection
-    compat = film.get("microplate_compatibility") or {}
-    if not isinstance(compat, dict) or not compat:
-        raise SystemExit(f"No microplate_compatibility defined for film {film_name!r}")
-
-    materials: list[str] = []
-    for mat, info in compat.items():
-        if isinstance(info, dict):
-            materials.append(mat)
-    if not materials:
-        raise SystemExit(f"No compatible plate materials for film {film_name!r}")
+    plates = seal_type.get("plates") or []
+    if not isinstance(plates, list) or not plates:
+        raise SystemExit(f"No plates defined for seal type {seal_name!r}")
 
     print()
-    print("Compatible plate materials for this film:")
-    for idx, mat in enumerate(materials, start=1):
-        print(f"  [{idx}] {mat}")
+    print("Available plate types for this seal:")
+    for idx, plate in enumerate(plates, start=1):
+        name = plate.get("name", "<unnamed>")
+        temp = plate.get("temperature_c", "?")
+        time_s = plate.get("time_s", "?")
+        print(f"  [{idx}] {name} ({temp} C, {time_s} s)")
 
-    try:
-        default_mat_idx = materials.index(DEF_PLATE_MATERIAL) + 1
-    except ValueError:
-        default_mat_idx = 1
-
-    raw = input(
-        f"Select plate material [1-{len(materials)}] (default {default_mat_idx}): "
-    ).strip()
+    raw = input(f"Select plate type [1-{len(plates)}] (default 1): ").strip()
     if not raw:
-        mat_idx = default_mat_idx
+        plate_idx = 1
     else:
-        mat_idx = int(raw)
-        if mat_idx < 1 or mat_idx > len(materials):
-            raise SystemExit("Invalid plate material selection")
+        plate_idx = int(raw)
+        if plate_idx < 1 or plate_idx > len(plates):
+            raise SystemExit("Invalid plate type selection")
 
-    plate_material = materials[mat_idx - 1]
-    return film_name, plate_material
+    plate = plates[plate_idx - 1]
+    plate_name = plate.get("name")
+    if not isinstance(plate_name, str) or not plate_name:
+        raise SystemExit("Selected plate type is missing a name")
+    return seal_name, plate_name
 
 
 def _prompt_int_setting(label: str, default: int, min_value: int, max_value: int) -> int:
@@ -228,9 +206,9 @@ def main() -> None:
     print("=" * 50)
     print()
 
-    # ── 3. Let user choose seal film / plate material ──────────────
-    film_name, plate_material = _choose_film_and_material()
-    params = get_seal_params(film_name, plate_material)
+    # ── 3. Let user choose seal type / plate type ───────────────────
+    seal_name, plate_name = _choose_seal_and_plate()
+    params = get_seal_parameters(seal_name, plate_name)
     recommended_temp_c = int(params["temperature_c"])
     recommended_time_s = float(params["time_s"])
     seal_temp_c, seal_time_s = _customize_seal_params(
@@ -239,9 +217,9 @@ def main() -> None:
     )
 
     log.info(
-        "Using film=%r, plate=%r -> temp=%d C, time=%.2f s",
-        film_name,
-        plate_material,
+        "Using seal=%r, plate=%r -> temp=%d C, time=%.2f s",
+        seal_name,
+        plate_name,
         seal_temp_c,
         seal_time_s,
     )

@@ -256,40 +256,49 @@ copy config.example.toml config.toml
 
 See `config.example.toml` for all available keys and their defaults.
 
-### Film-specific sealing settings
+### Seal parameter settings
 
-Different sealing films and plate materials require different temperature / time settings.  
-These are defined separately in `film_settings.json`, using data derived from Agilent’s film selection guide (for example, document `5990-3659EN` on Agilent’s site, such as [`https://www.agilent.com/cs/library/selectionguide/public/5990-3659en_lo%20CMS.pdf`](https://www.agilent.com/cs/library/selectionguide/public/5990-3659en_lo%20CMS.pdf)).
+Runnable seal defaults are stored in `parameters.json`. The demo uses this file to let the operator select:
+
+1. Seal type
+2. Exact plate type
+3. Default temperature / time, with a required confirm-or-override prompt
 
 The structure looks like:
 
 ```json
 {
-  "seal_films": [
+  "seal_types": [
     {
-      "name": "Peelable Aluminum",
-      "product_number": "24210-001",
-      "microplate_compatibility": {
-        "cyclic_olefin_copolymer": { "temperature": "190 °C", "time": "2.5 sec" },
-        "polypropylene":          { "temperature": "170 °C", "time": "1.2 sec" },
-        "polystyrene":            { "temperature": "185 °C", "time": "1.2 sec" }
-      }
+      "name": "Agilent Thin Clear Pierceable Film",
+      "plates": [
+        {
+          "name": "8R/12C PP Round Well Spherical Bottom (14mm)",
+          "temperature_c": 130,
+          "time_s": 3.0
+        },
+        {
+          "name": "8R/12C PP Square Well Flat Bottom (19mm)",
+          "temperature_c": 140,
+          "time_s": 6.0
+        }
+      ]
     }
   ]
 }
 ```
 
-In `config.toml` you select both the **seal film** and **plate material**:
+In `config.toml`, keep instrument settings and temperature wait behavior:
 
 ```toml
 [film]
-seal_name = "Peelable Aluminum"   # or product_number, e.g. "24210-001"
-plate_material = "polypropylene"  # cyclic_olefin_copolymer | polypropylene | polystyrene
 temperature_tolerance_c = 2
 heat_timeout_s = 120
 ```
 
-The demo script converts the selected film + plate material into numeric `temperature_c` and `time_s` and then uses those values to configure the PlateLoc.
+The demo configures the PlateLoc with the confirmed temperature/time, waits until the actual plate temperature is within tolerance of the requested temperature, and only then prompts the operator to press ENTER to start the seal cycle.
+
+`film_settings.json` is still kept as catalog/reference data derived from Agilent’s film selection guide, but `parameters.json` is the source used by the demo workflow.
 
 ## Legal / Licensing
 
