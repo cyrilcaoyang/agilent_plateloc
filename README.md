@@ -55,21 +55,57 @@ That document covers:
 - The `update_all.ps1` workflow for keeping multiple device services in sync after a `git push`.
 - Troubleshooting the common service-startup failures.
 
+Install uv into `C:\SDL_Tools\uv.exe`:
+
+```powershell
+# Run from an elevated PowerShell.
+New-Item -ItemType Directory -Force C:\SDL_Tools | Out-Null
+
+# Official uv installer. It installs into the current user's local bin first.
+powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
+
+# Copy the user-local uv.exe to the stable service path.
+# The fallback handles shells where PATH has already been refreshed and uv is
+# discoverable via Get-Command.
+$uvUser = Join-Path $env:USERPROFILE ".local\bin\uv.exe"
+if (!(Test-Path $uvUser)) {
+    $uvUser = (Get-Command uv -ErrorAction Stop).Source
+}
+Copy-Item $uvUser C:\SDL_Tools\uv.exe -Force
+
+# Verify the exact binary NSSM will call later.
+C:\SDL_Tools\uv.exe --version
+```
+
+Install NSSM:
+
+```powershell
+# Preferred on modern Windows.
+winget install -e --id NSSM.NSSM
+
+# If winget is unavailable, use Chocolatey or download nssm.exe manually:
+# choco install nssm -y
+# https://nssm.cc/download
+```
+
 Quick version, for the impatient:
 
 ```powershell
-# As Administrator, after following docs/DEVICE_PC_SETUP.md §2 once:
-cd C:\labs
+# As Administrator, after installing uv to C:\SDL_Tools\uv.exe and NSSM:
+New-Item -ItemType Directory -Force C:\Users\sdl2\Projects | Out-Null
+New-Item -ItemType Directory -Force C:\SDL_Logs            | Out-Null
+
+cd C:\Users\sdl2\Projects
 git clone https://github.com/cyrilcaoyang/agilent_plateloc.git
-cd C:\labs\agilent_plateloc
+cd C:\Users\sdl2\Projects\agilent_plateloc
 copy config.example.toml config.toml ; notepad config.toml
 C:\SDL_Tools\uv.exe sync --extra api
 
 nssm install plateloc C:\SDL_Tools\uv.exe `
-    run --project C:\labs\agilent_plateloc --extra api agilent-plateloc-serve
-nssm set plateloc AppDirectory  C:\labs\agilent_plateloc
-nssm set plateloc AppStdout     C:\labs\logs\plateloc.out.log
-nssm set plateloc AppStderr     C:\labs\logs\plateloc.err.log
+    run --project C:\Users\sdl2\Projects\agilent_plateloc --extra api agilent-plateloc-serve
+nssm set plateloc AppDirectory  C:\Users\sdl2\Projects\agilent_plateloc
+nssm set plateloc AppStdout     C:\SDL_Logs\plateloc.out.log
+nssm set plateloc AppStderr     C:\SDL_Logs\plateloc.err.log
 nssm set plateloc AppExit Default Restart
 nssm set plateloc ObjectName    ".\labuser" "<password>"
 nssm start plateloc
