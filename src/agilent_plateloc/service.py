@@ -33,6 +33,7 @@ from datetime import datetime, timezone
 from typing import Any, Awaitable, Callable
 
 from . import config as _config
+from .claims import ClaimStore
 from .models import (
     PROTOCOL_VERSION,
     ComponentStatus,
@@ -42,6 +43,46 @@ from .models import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# allowed_actions per equipment_status (v1.1)
+#
+# Mirrors the inverse of the SDK skill catalog's `requires_states` for
+# `kind=plate_sealer` (see lab_skills/skill_catalog/plate_sealer.py). Kept
+# here so the device is the source of truth: the SDK prefers our
+# allowed_actions over its own catalog whenever the field is non-empty.
+# ---------------------------------------------------------------------------
+
+_ALL_PLATE_SEALER_SKILLS = [
+    "startup",
+    "shutdown",
+    "seal.start",
+    "seal.stop",
+    "seal.set_temperature",
+    "seal.set_time",
+    "stage.in",
+    "stage.out",
+]
+
+_ALLOWED_ACTIONS_BY_STATE: dict[str, list[str]] = {
+    "requires_init": ["startup"],
+    "ready": [
+        "startup",
+        "shutdown",
+        "seal.start",
+        "seal.set_temperature",
+        "seal.set_time",
+        "stage.in",
+        "stage.out",
+    ],
+    "busy": ["shutdown", "seal.stop"],
+    "degraded": ["shutdown"],
+    "error": ["shutdown"],
+    "e_stop": [],
+    "unknown": [],
+    "dry_run": list(_ALL_PLATE_SEALER_SKILLS),
+}
 
 
 # ---------------------------------------------------------------------------
@@ -139,6 +180,7 @@ class PlateLocService:
         dry_run: bool = False,
         *,
         driver_factory: Callable[[], Any] | None = None,
+        enforce_claims: bool = True,
     ) -> None:
         """
         Parameters
@@ -150,6 +192,14 @@ class PlateLocService:
             Optional override that returns a driver instance. Tests use
             this to inject a stub while keeping ``dry_run=False`` so
             the operational state machine (ready/busy/error) is exercised.
+        enforce_claims:
+            STATUS_SPEC v1.1 strictness switch. When True (default), the
+            API layer rejects ``/control/*`` requests with HTTP 423 unless
+            they carry a valid ``X-Claim-Token``. Set False for the
+            handful of legacy / single-operator deployments that want
+            v1.1 *advisory* claims (the device still publishes
+            ``allowed_actions`` and ``details.claimed_by`` but does not
+            block writes from clients without a token).
         """
         self.dry_run = dry_run
         self._driver_factory = driver_factory
@@ -159,6 +209,8 @@ class PlateLocService:
         self._last_error: ErrorInfo | None = None
         self._busy_state: bool = False
         self._connect_profile: str | None = None
+        self.enforce_claims = enforce_claims
+        self.claims = ClaimStore()
 
         # Identity (configurable so a deployment can override).
         self.equipment_id: str = _config.get("dashboard", "equipment_id", "plateloc")
@@ -266,9 +318,21 @@ class PlateLocService:
         seconds and to always return HTTP 200 unless the process itself
         is broken. We therefore catch every per-getter failure and fold
         it into ``equipment_status: degraded`` rather than raising.
+
+        v1.1 fields (``allowed_actions``, ``details.claimed_by``) are
+        attached *after* the COM lock is released; the claim store has
+        its own (cheap) async lock and we want polling status to never
+        block behind long-running control operations.
         """
         async with self._lock:
-            return self._build_status()
+            status = self._build_status()
+        # NB: ``self.claims.current()`` is its own async coroutine that
+        # takes the claim store's internal lock. Calling it outside the
+        # COM lock means a slow seal cycle does not stall /status polling.
+        claimed_by = await self.claims.current()
+        if claimed_by is not None:
+            status.details["claimed_by"] = claimed_by.model_dump(mode="json")
+        return status
 
     def _build_status(self) -> EquipmentStatus:
         now = datetime.now(timezone.utc)
@@ -287,6 +351,7 @@ class PlateLocService:
                 equipment_status="requires_init",
                 message="Driver not connected. POST /control/startup to initialize.",
                 required_actions=["startup"],
+                allowed_actions=list(_ALLOWED_ACTIONS_BY_STATE["requires_init"]),
                 device_time=now,
                 uptime_seconds=uptime,
                 last_error=self._last_error,
@@ -380,6 +445,7 @@ class PlateLocService:
             host=host,
             equipment_status=state,  # type: ignore[arg-type]
             message=message,
+            allowed_actions=list(_ALLOWED_ACTIONS_BY_STATE.get(state, [])),
             device_time=now,
             uptime_seconds=uptime,
             components=components,

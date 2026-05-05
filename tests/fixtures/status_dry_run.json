@@ -1,4 +1,14 @@
 {
+  "allowed_actions": [
+    "startup",
+    "shutdown",
+    "seal.start",
+    "seal.stop",
+    "seal.set_temperature",
+    "seal.set_time",
+    "stage.in",
+    "stage.out"
+  ],
   "components": {
     "sealer": {
       "connected": true,
@@ -50,7 +60,7 @@
       "value": 170
     }
   },
-  "protocol_version": "1.0",
+  "protocol_version": "1.1",
   "required_actions": [],
   "uptime_seconds": 0.0
 }

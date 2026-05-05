@@ -1,14 +1,19 @@
 {
   "allowed_actions": [
+    "startup",
     "shutdown",
-    "seal.stop"
+    "seal.start",
+    "seal.set_temperature",
+    "seal.set_time",
+    "stage.in",
+    "stage.out"
   ],
   "components": {
     "sealer": {
       "connected": true,
       "last_event_at": null,
       "message": null,
-      "state": "busy"
+      "state": "idle"
     },
     "stage": {
       "connected": true,
@@ -31,11 +36,11 @@
   "equipment_id": "plateloc",
   "equipment_kind": "plate_sealer",
   "equipment_name": "Agilent PlateLoc",
-  "equipment_status": "busy",
+  "equipment_status": "ready",
   "equipment_version": null,
   "host": "plateloc-pc",
   "last_error": null,
-  "message": "Seal cycle in progress",
+  "message": "Idle, ready to seal",
   "metrics": {
     "actual_temperature": {
       "timestamp": "2026-04-29T22:50:01Z",
@@ -50,7 +55,7 @@
     "sealing_time": {
       "timestamp": "2026-04-29T22:50:01Z",
       "unit": "s",
-      "value": 3.0
+      "value": 1.2
     },
     "setpoint_temperature": {
       "timestamp": "2026-04-29T22:50:01Z",

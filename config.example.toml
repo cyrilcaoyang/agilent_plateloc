@@ -22,14 +22,20 @@ heat_timeout_s = 120
 
 # ── REST API service ────────────────────────────────────────────────
 # Used by `python -m agilent_plateloc` / `agilent-plateloc-serve`.
-# The API conforms to the lab equipment status spec v1.0 (see the
-# ac-organic-dashboard repo's docs/STATUS_SPEC.md).
+# The API conforms to the lab equipment status spec v1.1 (see the
+# ac-organic-lab monorepo's docs/STATUS_SPEC.md and STATUS_SPEC_v1_1.md).
 [service]
 host = "0.0.0.0"                            # Bind address (Tailscale-only by ACL)
 port = 8000                                 # HTTP port
 dry_run = false                             # true = run without hardware (for dev/CI)
 cors_origins = ["*"]                        # Tailnet ACLs gate access, so * is fine
 startup_connect_timeout_s = 15.0            # Auto-connect timeout at service start
+enforce_claims = true                       # v1.1: require X-Claim-Token on /control/*
+                                            #   true  = strict (recommended in production)
+                                            #   false = advisory (publishes claimed_by but
+                                            #           does not block writes; useful when
+                                            #           an existing v1.0 operator UI has
+                                            #           not yet learned to acquire a claim)
 
 # ── Dashboard identity ──────────────────────────────────────────────
 # Reported in GET /status. Must match the entry in the dashboard's

@@ -1,7 +1,13 @@
-"""Conformance tests for the lab equipment status spec v1.0.
+"""Conformance tests for the lab equipment status spec v1.1.
 
 These tests run with the dry-run stub driver so they require no Windows
 / ActiveX dependencies and can be executed in CI on any platform.
+
+The default ``client`` fixture (see ``conftest.py``) is built with
+``enforce_claims=True`` and pre-acquires a claim, so v1.0-era control
+tests keep working unchanged. v1.1-specific surface (claim protocol,
+``allowed_actions``, ``details.claimed_by``, 423 enforcement) is
+covered here and in ``test_claims.py``.
 """
 
 from __future__ import annotations
@@ -28,6 +34,7 @@ def test_probe(client: TestClient) -> None:
     assert body["equipment_id"] == "plateloc"
     assert body["equipment_name"] == "Agilent PlateLoc"
     assert body["protocol_version"] == PROTOCOL_VERSION
+    assert body["protocol_version"] == "1.1"
 
 
 def test_health(client: TestClient) -> None:
@@ -39,20 +46,26 @@ def test_health(client: TestClient) -> None:
 def test_openapi_doc(client: TestClient) -> None:
     """FastAPI auto-publishes /openapi.json - the spec requires it.
 
-    We assert that the EquipmentStatus schema is in the doc so an
-    `openapi-typescript` consumer (e.g. the dashboard frontend) can
+    We assert that the v1.0 + v1.1 schemas are in the doc so an
+    ``openapi-typescript`` consumer (e.g. the dashboard frontend) can
     pull types straight from this device.
     """
     r = client.get("/openapi.json")
     assert r.status_code == 200
     schemas = r.json()["components"]["schemas"]
     for required in [
+        # v1.0 envelope
         "EquipmentStatus",
         "ProbeResponse",
         "HealthResponse",
         "ComponentStatus",
         "MetricValue",
         "ErrorInfo",
+        # v1.1 claim protocol
+        "ClaimRequest",
+        "ClaimResponse",
+        "ClaimRejection",
+        "ClaimedBy",
     ]:
         assert required in schemas, f"OpenAPI doc is missing {required}"
 
@@ -69,6 +82,11 @@ def test_status_envelope(client: TestClient) -> None:
     assert body["equipment_status"] == "dry_run"
     assert isinstance(body["device_time"], str)
     assert isinstance(body["uptime_seconds"], (int, float))
+
+    # v1.1: allowed_actions is a top-level list of skill names.
+    assert isinstance(body["allowed_actions"], list)
+    assert "seal.start" in body["allowed_actions"]
+    assert "shutdown" in body["allowed_actions"]
 
     # Metrics are populated from the stub driver.
     metrics = body["metrics"]
@@ -97,24 +115,101 @@ def test_status_is_side_effect_free(client: TestClient) -> None:
     assert cc1 == cc2 == 0
 
 
-def test_status_always_200_when_disconnected() -> None:
+def test_status_always_200_when_disconnected(unclaimed_client: TestClient) -> None:
     """Spec rule #2: /status returns 200 even if hardware isn't ready.
 
-    We force a disconnect by calling /control/shutdown, then verify the
-    response is HTTP 200 with `equipment_status: requires_init`.
+    We force a disconnect by claiming + calling /control/shutdown, then
+    verify the response is HTTP 200 with `equipment_status: requires_init`.
     """
-    app = create_app_for_test()
-    with TestClient(app) as client:
-        client.post("/control/shutdown")
-        r = client.get("/status")
-        assert r.status_code == 200
-        body = r.json()
-        assert body["equipment_status"] == "requires_init"
-        assert "startup" in body["required_actions"]
+    r = unclaimed_client.post(
+        "/control/claim",
+        json={"owner": "pytest", "session_id": "shutdown-test", "ttl_s": 30},
+    )
+    token = r.json()["claim_token"]
+    unclaimed_client.post("/control/shutdown", headers={"X-Claim-Token": token})
+    r = unclaimed_client.get("/status")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["equipment_status"] == "requires_init"
+    assert "startup" in body["required_actions"]
+    # In requires_init the only action the device will honour is startup.
+    assert body["allowed_actions"] == ["startup"]
 
 
 # ---------------------------------------------------------------------------
-# Control endpoints
+# v1.1 allowed_actions semantics
+# ---------------------------------------------------------------------------
+
+
+def test_allowed_actions_changes_with_state(client: TestClient) -> None:
+    """allowed_actions must reflect current equipment_status.
+
+    Walks the dry-run state machine: dry_run starts with the full set
+    (because dry_run is by definition able to honour everything), then
+    after explicit shutdown we switch to requires_init -> startup-only.
+    """
+    body = client.get("/status").json()
+    assert body["equipment_status"] == "dry_run"
+    assert "seal.start" in body["allowed_actions"]
+    assert "stage.in" in body["allowed_actions"]
+
+    client.post("/control/shutdown")
+    body = client.get("/status").json()
+    assert body["equipment_status"] == "requires_init"
+    assert body["allowed_actions"] == ["startup"]
+
+
+def test_allowed_actions_ready_state() -> None:
+    """ready (real driver, not dry_run) exposes the full operating set
+    minus seal.stop (which only makes sense while busy)."""
+    from agilent_plateloc.api import create_app
+    from agilent_plateloc.service import _StubPlateLoc
+
+    app = create_app(dry_run=False, enforce_claims=True)
+    app.state.service._driver_factory = _StubPlateLoc
+    with TestClient(app) as alt:
+        r = alt.post(
+            "/control/claim",
+            json={"owner": "pytest", "session_id": "ready-test", "ttl_s": 60},
+        )
+        token = r.json()["claim_token"]
+        alt.headers["X-Claim-Token"] = token
+
+        alt.post("/control/startup", json={})
+        body = alt.get("/status").json()
+        assert body["equipment_status"] == "ready"
+        actions = set(body["allowed_actions"])
+        assert {"seal.start", "stage.in", "stage.out", "shutdown"} <= actions
+        assert "seal.stop" not in actions  # nothing to stop yet
+
+
+def test_allowed_actions_busy_state() -> None:
+    """busy advertises seal.stop and shutdown (and nothing that would
+    conflict with an in-flight cycle)."""
+    from agilent_plateloc.api import create_app
+    from agilent_plateloc.service import _StubPlateLoc
+
+    app = create_app(dry_run=False, enforce_claims=True)
+    app.state.service._driver_factory = _StubPlateLoc
+    with TestClient(app) as alt:
+        r = alt.post(
+            "/control/claim",
+            json={"owner": "pytest", "session_id": "busy-test", "ttl_s": 60},
+        )
+        alt.headers["X-Claim-Token"] = r.json()["claim_token"]
+
+        alt.post("/control/startup", json={})
+        alt.post("/control/seal/start", json={"temperature_c": 170, "seconds": 3.0})
+        body = alt.get("/status").json()
+        assert body["equipment_status"] == "busy"
+        actions = set(body["allowed_actions"])
+        assert "seal.stop" in actions
+        assert "shutdown" in actions
+        assert "seal.start" not in actions  # already running
+
+
+# ---------------------------------------------------------------------------
+# Control endpoints (existing v1.0 behaviour, now under a held claim)
 # ---------------------------------------------------------------------------
 
 
@@ -150,15 +245,18 @@ def test_temperature_setpoint_persists(client: TestClient) -> None:
     assert body["metrics"]["setpoint_temperature"]["value"] == 145
 
 
-def test_shutdown_then_control_returns_409() -> None:
+def test_shutdown_then_control_returns_409(client: TestClient) -> None:
     """Spec-friendly behaviour: control endpoints fail with 409 (not 500)
     when the driver isn't connected, so the operator UI can render a
-    clear "click Connect first" message."""
-    app = create_app_for_test()
-    with TestClient(app) as client:
-        client.post("/control/shutdown")
-        r = client.post("/control/seal/start", json={})
-        assert r.status_code == 409
+    clear "click Connect first" message.
+
+    Note: the claim is acquired by the fixture, so the 423 path is *not*
+    hit here; this test exists to assert the post-shutdown 409 path,
+    which is independent of v1.1 enforcement.
+    """
+    client.post("/control/shutdown")
+    r = client.post("/control/seal/start", json={})
+    assert r.status_code == 409
 
 
 # ---------------------------------------------------------------------------
@@ -175,10 +273,13 @@ def _scrub_for_diff(body: dict) -> dict:
     for metric in body.get("metrics", {}).values():
         if metric.get("timestamp"):
             metric["timestamp"] = "2026-04-29T22:50:01Z"
+    # Claim expiry is wall-clock; scrub the same way as device_time.
+    if isinstance(body.get("details"), dict) and "claimed_by" in body["details"]:
+        body["details"]["claimed_by"]["expires_at"] = "2026-04-29T22:51:01Z"
     return body
 
 
-def test_save_status_fixtures(client: TestClient) -> None:
+def test_save_status_fixtures(unclaimed_client: TestClient) -> None:
     """Re-generate ``tests/fixtures/status_*.json``.
 
     Fixtures are checked into git so reviewers can eyeball schema
@@ -186,18 +287,19 @@ def test_save_status_fixtures(client: TestClient) -> None:
     the diffs as part of the PR.
 
     Coverage:
-      - status_requires_init.json - hardware not connected (spec example)
-      - status_ready.json         - connected & idle (uses stub driver)
-      - status_busy.json          - cycle in progress (uses stub driver)
-      - status_dry_run.json       - dry-run mode advertised in /status
+      - status_requires_init.json   - hardware not connected (spec example)
+      - status_ready.json           - connected & idle (uses stub driver)
+      - status_ready_claimed.json   - same, but with details.claimed_by
+      - status_busy.json            - cycle in progress (uses stub driver)
+      - status_dry_run.json         - dry-run mode advertised in /status
     """
     from agilent_plateloc.api import create_app
     from agilent_plateloc.service import _StubPlateLoc
 
     FIXTURES.mkdir(exist_ok=True)
 
-    # dry_run snapshot - the default fixture client uses dry_run=True.
-    body = client.get("/status").json()
+    # dry_run snapshot (no claim active).
+    body = unclaimed_client.get("/status").json()
     (FIXTURES / "status_dry_run.json").write_text(
         json.dumps(_scrub_for_diff(body), indent=2, sort_keys=True) + "\n"
     )
@@ -205,15 +307,46 @@ def test_save_status_fixtures(client: TestClient) -> None:
     # ready/busy: spin up a fresh service with the stub injected via
     # driver_factory but `dry_run=False`, so equipment_status reflects
     # the real operational state machine.
-    app = create_app(dry_run=False)
+    app = create_app(dry_run=False, enforce_claims=True)
     app.state.service._driver_factory = _StubPlateLoc
     with TestClient(app) as alt:
+        # Acquire the claim under a stable session_id so the fixture is
+        # reproducible (apart from expires_at, which the scrubber pins).
+        r = alt.post(
+            "/control/claim",
+            json={"owner": "fixture", "session_id": "fixture-session", "ttl_s": 60},
+        )
+        token = r.json()["claim_token"]
+        alt.headers["X-Claim-Token"] = token
+
         alt.post("/control/startup", json={})
         body = alt.get("/status").json()
         assert body["equipment_status"] == "ready"
+        # Snapshot WITH the claim metadata so reviewers see the v1.1 shape.
+        (FIXTURES / "status_ready_claimed.json").write_text(
+            json.dumps(_scrub_for_diff(body), indent=2, sort_keys=True) + "\n"
+        )
+
+        # Snapshot WITHOUT claim metadata (back-compat with v1.0 readers).
+        # Release the claim, re-poll, snapshot.
+        alt.post("/control/release", headers={"X-Claim-Token": token})
+        del alt.headers["X-Claim-Token"]
+        body = alt.get("/status").json()
+        assert "claimed_by" not in body["details"]
         (FIXTURES / "status_ready.json").write_text(
             json.dumps(_scrub_for_diff(body), indent=2, sort_keys=True) + "\n"
         )
+
+        # Re-acquire for the busy snapshot.
+        r = alt.post(
+            "/control/claim",
+            json={
+                "owner": "fixture",
+                "session_id": "fixture-session",
+                "ttl_s": 60,
+            },
+        )
+        alt.headers["X-Claim-Token"] = r.json()["claim_token"]
 
         alt.post(
             "/control/seal/start", json={"temperature_c": 170, "seconds": 3.0}
@@ -225,21 +358,19 @@ def test_save_status_fixtures(client: TestClient) -> None:
         )
 
     # requires_init: shut the dry-run driver down explicitly.
-    client.post("/control/shutdown")
-    body = client.get("/status").json()
+    r = unclaimed_client.post(
+        "/control/claim",
+        json={"owner": "fixture", "session_id": "fixture-shutdown", "ttl_s": 60},
+    )
+    unclaimed_client.headers["X-Claim-Token"] = r.json()["claim_token"]
+    unclaimed_client.post("/control/shutdown")
+    unclaimed_client.post(
+        "/control/release",
+        headers={"X-Claim-Token": unclaimed_client.headers["X-Claim-Token"]},
+    )
+    del unclaimed_client.headers["X-Claim-Token"]
+    body = unclaimed_client.get("/status").json()
     assert body["equipment_status"] == "requires_init"
     (FIXTURES / "status_requires_init.json").write_text(
         json.dumps(_scrub_for_diff(body), indent=2, sort_keys=True) + "\n"
     )
-
-
-# ---------------------------------------------------------------------------
-# Local helper - avoids fixture coupling for the small number of tests
-# that need a fresh app per assertion.
-# ---------------------------------------------------------------------------
-
-
-def create_app_for_test():
-    from agilent_plateloc.api import create_app
-
-    return create_app(dry_run=True)

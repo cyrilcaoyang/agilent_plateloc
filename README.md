@@ -2,7 +2,7 @@
 
 Python driver and REST API service for the **Agilent PlateLoc Thermal Microplate Sealer**, communicating through the VWorks ActiveX COM control over a serial (COM) port.
 
-> **API conformance:** This repo conforms to **lab status spec v1.0** (see `docs/STATUS_SPEC.md` in the [`ac-organic-dashboard`](https://github.com/cyrilcaoyang/ac-organic-dashboard) repo). The dashboard auto-discovers this device by polling its `/status` endpoint.
+> **API conformance:** This repo conforms to **lab status spec v1.1** (see `docs/STATUS_SPEC.md` and `docs/STATUS_SPEC_v1_1.md` in the [`ac-organic-lab`](https://github.com/cyrilcaoyang/ac-organic-lab) monorepo). The dashboard auto-discovers this device by polling its `/status` endpoint; the SDK acquires a short-lived claim via `POST /control/claim` before issuing other `/control/*` writes.
 
 ## Prerequisites
 
@@ -198,8 +198,9 @@ with PlateLoc() as sealer:           # reads com_port from config.toml
 ## REST API
 
 The repo ships a FastAPI service that exposes the driver over HTTP using
-the unified lab equipment status spec (v1.0). The dashboard polls this
-service every 2-3 seconds.
+the unified lab equipment status spec (v1.1). The dashboard polls this
+service every 2-3 seconds; orchestrators acquire a short-lived claim
+before issuing writes to `/control/*`.
 
 ### Run the service
 
@@ -226,6 +227,9 @@ port = 8000
 dry_run = false           # true = run without ActiveX/COM (CI, dev)
 cors_origins = ["*"]      # tighten if device leaves the Tailnet
 startup_connect_timeout_s = 15.0
+enforce_claims = true     # v1.1: require X-Claim-Token on /control/*
+                          # set false for advisory mode (publishes
+                          # claimed_by but doesn't block writes)
 
 [dashboard]
 equipment_id = "plateloc"          # MUST match equipment.yaml in the dashboard
@@ -234,7 +238,7 @@ equipment_name = "Agilent PlateLoc"
 
 ### Endpoints
 
-Spec-mandated (always available):
+Spec-mandated (always available, no claim required):
 
 | Method | Path             | Returns                                         |
 |--------|------------------|-------------------------------------------------|
@@ -243,7 +247,15 @@ Spec-mandated (always available):
 | GET    | `/status`        | Full `EquipmentStatus` envelope (always 200)    |
 | GET    | `/openapi.json`  | OpenAPI document (FastAPI auto-generates)       |
 
-Control (optional, useful for an operator UI later):
+Claim protocol (v1.1, no token required to *acquire* a claim):
+
+| Method | Path                  | Body / Headers                                 |
+|--------|-----------------------|------------------------------------------------|
+| POST   | `/control/claim`      | `{owner, session_id, ttl_s}` -> `ClaimResponse` (or 409 `ClaimRejection`) |
+| POST   | `/control/heartbeat`  | header `X-Claim-Token` -> `ClaimResponse` (or 401) |
+| POST   | `/control/release`    | header `X-Claim-Token` -> 204 (idempotent)     |
+
+Control (require `X-Claim-Token` matching the live claim, or HTTP 423):
 
 | Method | Path                          | Body                                          |
 |--------|-------------------------------|-----------------------------------------------|
@@ -256,27 +268,56 @@ Control (optional, useful for an operator UI later):
 | POST   | `/control/stage/in`           | `{}`                                          |
 | POST   | `/control/stage/out`          | `{}`                                          |
 
-Control endpoints return **409 Conflict** if the driver isn't connected
-yet (operator should hit `/control/startup` first), **422** for
-out-of-range parameters, and **503** if connect itself fails.
+Control endpoints return **423 Locked** when no/wrong `X-Claim-Token` is
+provided (with `claimed_by` in the body so the caller can see who holds
+the device), **409 Conflict** if the driver isn't connected yet
+(operator should hit `/control/startup` first), **422** for out-of-range
+parameters, and **503** if connect itself fails.
+
+The `EquipmentStatus` envelope additionally includes:
+
+* **`allowed_actions`** — a flat list of skill names the device will
+  currently honour on `/control/*`. Authoritative; the SDK prefers this
+  over its own catalog `requires_states` whenever non-empty.
+* **`details.claimed_by`** — `{session_id, owner, expires_at}` while a
+  claim is held; absent when unclaimed.
 
 ### Quick check
 
 ```bash
-# Probe + health
+# Probe + health (no claim required)
 curl http://plateloc-pc:8000/
 curl http://plateloc-pc:8000/health
 
 # Full status snapshot
 curl http://plateloc-pc:8000/status | jq
 
-# Connect, set parameters, run a cycle
+# Acquire a claim, then issue control writes
+TOKEN=$(curl -sX POST http://plateloc-pc:8000/control/claim \
+  -H 'Content-Type: application/json' \
+  -d '{"owner": "alice@cli", "session_id": "demo-1", "ttl_s": 60}' \
+  | jq -r .claim_token)
+
 curl -X POST http://plateloc-pc:8000/control/startup \
+  -H "X-Claim-Token: $TOKEN" \
   -H 'Content-Type: application/json' -d '{"profile": "default"}'
+
 curl -X POST http://plateloc-pc:8000/control/seal/start \
+  -H "X-Claim-Token: $TOKEN" \
   -H 'Content-Type: application/json' \
   -d '{"temperature_c": 170, "seconds": 3.0}'
+
+# Heartbeat every ~heartbeat_interval_s while you still need the device,
+# then release on exit.
+curl -X POST http://plateloc-pc:8000/control/heartbeat \
+  -H "X-Claim-Token: $TOKEN"
+curl -X POST http://plateloc-pc:8000/control/release \
+  -H "X-Claim-Token: $TOKEN"
 ```
+
+The Python SDK (`lab_skills.ClaimManager`) handles the
+acquire/heartbeat/release loop automatically; raw `curl` is only useful
+for one-off operator probing.
 
 ### Spec conformance notes
 
@@ -292,12 +333,13 @@ curl -X POST http://plateloc-pc:8000/control/seal/start \
   dashboard registry is the single source of truth for "where to reach
   this device".
 * `models.py` is a verbatim copy of the spec from
-  `ac-organic-dashboard/docs/STATUS_SPEC.md` and will eventually be
-  replaced by `from lab_status_contract import ...`.
+  `ac-organic-lab/docs/STATUS_SPEC.md` and `STATUS_SPEC_v1_1.md` and
+  will eventually be replaced by `from lab_status_contract import ...`.
 
 Reference snapshots live in `tests/fixtures/status_*.json` covering
-`requires_init`, `ready`, `busy`, and `dry_run`. They are regenerated
-by `pytest` and committed so reviewers can eyeball schema changes.
+`requires_init`, `ready`, `ready_claimed`, `busy`, and `dry_run`. They
+are regenerated by `pytest` and committed so reviewers can eyeball
+schema changes.
 
 ### Running on the device PC
 
@@ -323,15 +365,18 @@ agilent_plateloc/
 │       ├── plateloc.py          # Main driver class (ActiveX/COM)
 │       ├── _com_server.py       # 32-bit COM surrogate (internal)
 │       ├── config.py            # Config loader (reads config.toml)
-│       ├── models.py            # Lab status spec v1.0 Pydantic models
+│       ├── models.py            # Lab status spec v1.1 Pydantic models
+│       ├── claims.py            # v1.1 ClaimStore (acquire/heartbeat/release)
 │       ├── service.py           # PlateLocService - state + locking + dry-run
-│       └── api.py               # FastAPI app (spec + control endpoints)
+│       └── api.py               # FastAPI app (spec + claim + control endpoints)
 └── tests/
-    ├── conftest.py              # TestClient fixture (dry-run)
+    ├── conftest.py              # TestClient fixtures (dry-run, claimed)
     ├── test_api.py              # Spec conformance tests + fixture writer
+    ├── test_claims.py           # v1.1 claim protocol conformance tests
     └── fixtures/
         ├── status_dry_run.json
         ├── status_ready.json
+        ├── status_ready_claimed.json
         ├── status_busy.json
         └── status_requires_init.json
 ```
