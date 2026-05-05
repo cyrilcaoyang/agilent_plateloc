@@ -49,7 +49,7 @@ For a Windows lab PC that runs this service 24/7 (and possibly other device serv
 
 That document covers:
 
-- Installing uv to a system-wide path (`C:\Tools\uv.exe`) so Windows Services can find it.
+- Installing uv to a system-wide path (`C:\SDL_Tools\uv.exe`) so Windows Services can find it.
 - Wrapping `agilent-plateloc-serve` in **NSSM** so it auto-starts on boot, restarts on crash, and writes rotated log files (the systemd-equivalent for Windows).
 - Running the service as a real lab user account (not `LocalSystem` — required for the PlateLoc ActiveX profile lookup in `HKCU` to succeed).
 - The `update_all.ps1` workflow for keeping multiple device services in sync after a `git push`.
@@ -63,9 +63,9 @@ cd C:\labs
 git clone https://github.com/cyrilcaoyang/agilent_plateloc.git
 cd C:\labs\agilent_plateloc
 copy config.example.toml config.toml ; notepad config.toml
-C:\Tools\uv.exe sync --extra api
+C:\SDL_Tools\uv.exe sync --extra api
 
-nssm install plateloc C:\Tools\uv.exe `
+nssm install plateloc C:\SDL_Tools\uv.exe `
     run --project C:\labs\agilent_plateloc --extra api agilent-plateloc-serve
 nssm set plateloc AppDirectory  C:\labs\agilent_plateloc
 nssm set plateloc AppStdout     C:\labs\logs\plateloc.out.log
@@ -503,7 +503,7 @@ agilent-plateloc-serve
 Caveats:
 
 - No `uv.lock`-equivalent: `pip install` resolves PyPI fresh each time, so two installs on different days may pick different transitive versions.
-- The NSSM service wrapper is fiddlier with conda — it has to invoke `cmd.exe /c "conda activate plateloc && agilent-plateloc-serve"`, which has caused service-startup races in the field. With uv, NSSM points at `C:\Tools\uv.exe run --project ...` and there is no activation step.
+- The NSSM service wrapper is fiddlier with conda — it has to invoke `cmd.exe /c "conda activate plateloc && agilent-plateloc-serve"`, which has caused service-startup races in the field. With uv, NSSM points at `C:\SDL_Tools\uv.exe run --project ...` and there is no activation step.
 - The 32-bit Python sub-process for the ActiveX control is unaffected by either choice — that runtime is installed via `py -3.13-32` and lives outside the Python environment manager.
 
 For a multi-device PC running several services 24/7, the uv path in `docs/DEVICE_PC_SETUP.md` is meaningfully simpler and is what the rest of the lab uses.
