@@ -14,12 +14,10 @@ Python driver and REST API service for the **Agilent PlateLoc Thermal Microplate
 
 ## Installation
 
-### Development — uv environment
-
-[uv](https://docs.astral.sh/uv/) is the recommended tool for fast, reproducible development environments.
+[uv](https://docs.astral.sh/uv/) is the canonical environment manager for this repo and for the rest of the [`ac-organic-lab`](https://github.com/AccelerationConsortium/ac-organic-lab) stack. It provides reproducible installs (every dependency is pinned in `uv.lock`), is significantly faster than pip, and integrates cleanly with the Windows Service supervisor used in production (NSSM — see [Production deployment](#production-deployment) below).
 
 ```powershell
-# Install uv (if you don't have it)
+# Install uv (one-time per PC)
 powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
 
 # Clone / navigate to the project
@@ -27,37 +25,57 @@ cd path\to\agilent_plateloc
 
 # Copy the example config and edit for your setup
 copy config.example.toml config.toml
-# Edit config.toml — set com_port, profile name, etc.
+# Edit config.toml — set com_port, profile name, port, enforce_claims, etc.
 
-# Create a virtual environment with Python 3.10 and install with dev deps
-uv venv .venv --python 3.10
-.venv\Scripts\activate
-uv pip install -e ".[dev]"
+# Sync runtime + dev dependencies (creates .venv automatically)
+uv sync --extra dev
 
 # Run tests
-pytest
+uv run pytest
+
+# Run the service in the foreground (Ctrl-C to stop)
+uv run --extra api agilent-plateloc-serve
 ```
 
-### Production — conda environment
+`uv sync --extra dev` installs everything needed to run the test suite (`pytest`, `httpx`, etc.) plus the FastAPI runtime. For a runtime-only install (e.g., on the lab PC), use `uv sync --extra api` — see [Production deployment](#production-deployment).
+
+> **Already on conda?** If your team's standard is conda and you'd rather not introduce a second tool, see [Appendix: Alternative install via conda](#appendix-alternative-install-via-conda) at the bottom of this README. Functionally equivalent; the rest of the lab still runs uv.
+
+### Production deployment
+
+For a Windows lab PC that runs this service 24/7 (and possibly other device services on the same PC), follow the canonical install recipe in the monorepo:
+
+**[`docs/DEVICE_PC_SETUP.md`](https://github.com/AccelerationConsortium/ac-organic-lab/blob/main/docs/DEVICE_PC_SETUP.md)**
+
+That document covers:
+
+- Installing uv to a system-wide path (`C:\Tools\uv.exe`) so Windows Services can find it.
+- Wrapping `agilent-plateloc-serve` in **NSSM** so it auto-starts on boot, restarts on crash, and writes rotated log files (the systemd-equivalent for Windows).
+- Running the service as a real lab user account (not `LocalSystem` — required for the PlateLoc ActiveX profile lookup in `HKCU` to succeed).
+- The `update_all.ps1` workflow for keeping multiple device services in sync after a `git push`.
+- Troubleshooting the common service-startup failures.
+
+Quick version, for the impatient:
 
 ```powershell
-# Create a dedicated conda environment
-conda create -n plateloc python=3.10 -y
-conda activate plateloc
+# As Administrator, after following docs/DEVICE_PC_SETUP.md §2 once:
+cd C:\labs
+git clone https://github.com/cyrilcaoyang/agilent_plateloc.git
+cd C:\labs\agilent_plateloc
+copy config.example.toml config.toml ; notepad config.toml
+C:\Tools\uv.exe sync --extra api
 
-# Install the package from the local source
-pip install .
-
-# Or install in editable mode if you want to iterate
-pip install -e .
+nssm install plateloc C:\Tools\uv.exe `
+    run --project C:\labs\agilent_plateloc --extra api agilent-plateloc-serve
+nssm set plateloc AppDirectory  C:\labs\agilent_plateloc
+nssm set plateloc AppStdout     C:\labs\logs\plateloc.out.log
+nssm set plateloc AppStderr     C:\labs\logs\plateloc.err.log
+nssm set plateloc AppExit Default Restart
+nssm set plateloc ObjectName    ".\labuser" "<password>"
+nssm start plateloc
 ```
 
-If the package is later published to a private PyPI / Artifactory:
-
-```powershell
-conda activate plateloc
-pip install agilent-plateloc
-```
+After the service is up, register the device in the dashboard's `equipment.yaml` with `adapter: http` and `protocol: "1.1"` (see `docs/STATUS_SPEC_v1_1.md`).
 
 ## 32-bit Python Requirement
 
@@ -470,6 +488,25 @@ heat_timeout_s = 120
 The demo configures the PlateLoc with the confirmed temperature/time, waits until the actual plate temperature is within tolerance of the requested temperature, and only then prompts the operator to press ENTER to start the seal cycle.
 
 `film_settings.json` is still kept as catalog/reference data derived from Agilent’s film selection guide, but `parameters.json` is the source used by the demo workflow.
+
+## Appendix: Alternative install via conda
+
+The recommended path is uv (see [Installation](#installation) above). If your team is already standardised on Anaconda and you'd rather not introduce a second tool, the following also works:
+
+```powershell
+conda create -n plateloc python=3.10 -y
+conda activate plateloc
+pip install -e ".[api,dev]"          # or just .[api] for runtime-only
+agilent-plateloc-serve
+```
+
+Caveats:
+
+- No `uv.lock`-equivalent: `pip install` resolves PyPI fresh each time, so two installs on different days may pick different transitive versions.
+- The NSSM service wrapper is fiddlier with conda — it has to invoke `cmd.exe /c "conda activate plateloc && agilent-plateloc-serve"`, which has caused service-startup races in the field. With uv, NSSM points at `C:\Tools\uv.exe run --project ...` and there is no activation step.
+- The 32-bit Python sub-process for the ActiveX control is unaffected by either choice — that runtime is installed via `py -3.13-32` and lives outside the Python environment manager.
+
+For a multi-device PC running several services 24/7, the uv path in `docs/DEVICE_PC_SETUP.md` is meaningfully simpler and is what the rest of the lab uses.
 
 ## Legal / Licensing
 
