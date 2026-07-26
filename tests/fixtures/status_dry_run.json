@@ -1,9 +1,10 @@
 {
+  "activity": "idle",
+  "activity_since": "2026-04-29T22:49:44Z",
   "allowed_actions": [
     "startup",
     "shutdown",
     "seal.start",
-    "seal.stop",
     "seal.set_temperature",
     "seal.set_time",
     "stage.out"
@@ -40,7 +41,7 @@
   "equipment_kind": "plate_sealer",
   "equipment_name": "Agilent PlateLoc",
   "equipment_status": "dry_run",
-  "equipment_version": null,
+  "equipment_version": "1.4.0",
   "host": "plateloc-pc",
   "last_error": null,
   "message": "Dry-run mode - no hardware connected",
@@ -51,6 +52,11 @@
       "value": 170
     },
     "cycle_count": {
+      "timestamp": null,
+      "unit": "count",
+      "value": 0
+    },
+    "cycles_total": {
       "timestamp": null,
       "unit": "count",
       "value": 0
@@ -71,7 +77,7 @@
       "value": 0.0
     }
   },
-  "protocol_version": "1.1",
+  "protocol_version": "1.2",
   "required_actions": [],
   "uptime_seconds": 0.0
 }

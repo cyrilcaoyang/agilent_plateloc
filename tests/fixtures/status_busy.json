@@ -1,4 +1,6 @@
 {
+  "activity": "running",
+  "activity_since": "2026-04-29T22:49:44Z",
   "allowed_actions": [
     "shutdown",
     "seal.stop"
@@ -20,18 +22,15 @@
       "connected": true,
       "last_event_at": null,
       "message": null,
-      "state": "in"
+      "state": "unknown"
     }
   },
   "details": {
     "activex_version": "DRY-RUN-AX",
-    "claimed_by": {
-      "expires_at": "2026-04-29T22:51:01Z",
-      "owner": "fixture",
-      "session_id": "fixture-session"
-    },
     "com_port": "DRY-RUN",
+    "cycle_started_at": "2026-04-29T22:50:01Z",
     "firmware_version": "DRY-RUN-1.0",
+    "readings_as_of": "2026-04-29T22:50:01Z",
     "temperature_tolerance_c": 2.0
   },
   "device_time": "2026-04-29T22:50:01Z",
@@ -39,7 +38,7 @@
   "equipment_kind": "plate_sealer",
   "equipment_name": "Agilent PlateLoc",
   "equipment_status": "busy",
-  "equipment_version": null,
+  "equipment_version": "1.4.0",
   "host": "plateloc-pc",
   "last_error": null,
   "message": "Seal cycle in progress",
@@ -54,10 +53,15 @@
       "unit": "count",
       "value": 0
     },
+    "cycles_total": {
+      "timestamp": null,
+      "unit": "count",
+      "value": 0
+    },
     "sealing_time": {
       "timestamp": "2026-04-29T22:50:01Z",
       "unit": "s",
-      "value": 3.0
+      "value": 1.2
     },
     "setpoint_temperature": {
       "timestamp": "2026-04-29T22:50:01Z",
@@ -70,7 +74,7 @@
       "value": 0.0
     }
   },
-  "protocol_version": "1.1",
+  "protocol_version": "1.2",
   "required_actions": [],
   "uptime_seconds": 0.0
 }

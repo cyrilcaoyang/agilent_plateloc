@@ -22,8 +22,8 @@ heat_timeout_s = 120
 
 # ── REST API service ────────────────────────────────────────────────
 # Used by `python -m agilent_plateloc_server` / `agilent-plateloc-serve`.
-# The API conforms to the lab equipment status spec v1.1 (see the
-# ac-organic-lab monorepo's docs/STATUS_SPEC.md and STATUS_SPEC_v1_1.md).
+# The API conforms to the lab equipment status spec v1.2 (see the
+# ac-organic-lab monorepo's docs/STATUS_SPEC.md).
 [service]
 host = "0.0.0.0"                            # Bind address (Tailscale-only by ACL)
 port = 8000                                 # HTTP port
@@ -57,4 +57,6 @@ enforce_stage_interlock = true              # Layer-1 safety (v1.3.0): refuse
 [dashboard]
 equipment_id = "plateloc"
 equipment_name = "Agilent PlateLoc"
-# equipment_version = "1.0.0"               # optional - bump on driver releases
+# equipment_version = "1.0.0"               # optional - defaults to the package
+                                            # version, so /status never reports
+                                            # a null build. Set only to override.

@@ -255,6 +255,6 @@ def test_advisory_mode_still_publishes_allowed_actions(
     advisory_client: TestClient,
 ) -> None:
     body = advisory_client.get("/status").json()
-    assert body["protocol_version"] == "1.1"
+    assert body["protocol_version"] == "1.2"
     assert isinstance(body["allowed_actions"], list)
     assert len(body["allowed_actions"]) > 0

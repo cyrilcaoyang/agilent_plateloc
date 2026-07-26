@@ -27,7 +27,7 @@ from .api import create_app
 def main() -> None:
     parser = argparse.ArgumentParser(
         prog="agilent-plateloc-serve",
-        description="Run the Agilent PlateLoc REST API (lab status spec v1.0).",
+        description="Run the Agilent PlateLoc REST API (lab status spec v1.2).",
     )
     parser.add_argument("--host", default=None, help="Override bind host")
     parser.add_argument("--port", type=int, default=None, help="Override port")

@@ -1,58 +1,57 @@
 {
-  "activity": "idle",
+  "activity": "running",
   "activity_since": "2026-04-29T22:49:44Z",
   "allowed_actions": [
-    "startup",
     "shutdown",
-    "seal.set_temperature",
-    "seal.set_time",
-    "stage.out"
+    "seal.stop"
   ],
   "components": {
     "heater": {
       "connected": true,
       "last_event_at": null,
-      "message": "Heating 80 -> 170 C",
-      "state": "heating"
+      "message": "At setpoint (170 C)",
+      "state": "stable"
     },
     "sealer": {
       "connected": true,
       "last_event_at": null,
       "message": null,
-      "state": "idle"
+      "state": "busy"
     },
     "stage": {
       "connected": true,
       "last_event_at": null,
       "message": null,
-      "state": "in"
+      "state": "unknown"
     }
   },
   "details": {
     "activex_version": "DRY-RUN-AX",
-    "claimed_by": {
-      "expires_at": "2026-04-29T22:51:01Z",
-      "owner": "fixture",
-      "session_id": "fixture-session"
-    },
     "com_port": "DRY-RUN",
+    "cycle_started_at": "2026-04-29T22:50:01Z",
     "firmware_version": "DRY-RUN-1.0",
+    "readings_as_of": "2026-04-29T22:50:01Z",
     "temperature_tolerance_c": 2.0
   },
   "device_time": "2026-04-29T22:50:01Z",
   "equipment_id": "plateloc",
   "equipment_kind": "plate_sealer",
   "equipment_name": "Agilent PlateLoc",
-  "equipment_status": "ready",
+  "equipment_status": "degraded",
   "equipment_version": "1.4.0",
   "host": "plateloc-pc",
-  "last_error": null,
-  "message": "Idle, ready to seal",
+  "last_error": {
+    "code": "com_timeout",
+    "message": "sealing_time: GetSealingTime timed out",
+    "severity": "warning",
+    "timestamp": "2026-04-29T22:50:01Z"
+  },
+  "message": "sealing_time: GetSealingTime timed out \u2014 seal cycle continues",
   "metrics": {
     "actual_temperature": {
       "timestamp": "2026-04-29T22:50:01Z",
       "unit": "C",
-      "value": 80
+      "value": 170
     },
     "cycle_count": {
       "timestamp": null,
@@ -64,11 +63,6 @@
       "unit": "count",
       "value": 0
     },
-    "sealing_time": {
-      "timestamp": "2026-04-29T22:50:01Z",
-      "unit": "s",
-      "value": 1.2
-    },
     "setpoint_temperature": {
       "timestamp": "2026-04-29T22:50:01Z",
       "unit": "C",
@@ -77,7 +71,7 @@
     "temperature_delta_c": {
       "timestamp": "2026-04-29T22:50:01Z",
       "unit": "C",
-      "value": -90.0
+      "value": 0.0
     }
   },
   "protocol_version": "1.2",

@@ -8,6 +8,8 @@ build/
 
 # Virtual environments
 .venv/
+# dev/test env, kept separate from the .venv the NSSM service runs from
+.venv-dev/
 venv/
 
 # Machine-specific config (use config.example.toml as template)

@@ -1,4 +1,4 @@
-"""FastAPI app exposing the PlateLoc service over the lab status spec v1.1.
+"""FastAPI app exposing the PlateLoc service over the lab status spec v1.2.
 
 Endpoints
 ---------
@@ -30,6 +30,13 @@ the device returns HTTP 423.
 * ``POST /control/stage/in``
 * ``POST /control/stage/out``
 
+``POST /control/seal/start`` is **synchronous**: the ActiveX control runs in
+blocking mode, so the request returns when the physical seal cycle has
+finished. For that whole span ``/status`` reports ``activity: "running"``
+(v1.2 §2.3) and refuses anything but the abort class — a second
+``seal/start``, a stage move, or a setpoint write gets HTTP 409 while a cycle
+is in flight, matching what ``allowed_actions`` advertises.
+
 Auth: none at the device level; access is gated by Tailscale ACLs.
 The claim protocol provides *coordination*, not authentication.
 CORS: wildcard by default; tighten via ``[service] cors_origins`` in
@@ -48,6 +55,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
+from . import __version__
 from . import config as _config
 from .claims import ClaimConflict, UnknownClaim
 from .models import (
@@ -59,7 +67,12 @@ from .models import (
     HealthResponse,
     ProbeResponse,
 )
-from .service import PlateLocService, StageNotLoaded, TemperatureOutOfBand
+from .service import (
+    PlateLocService,
+    RecentFailureNotCleared,
+    StageNotLoaded,
+    TemperatureOutOfBand,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -209,12 +222,13 @@ def create_app(
 
     app = FastAPI(
         title="Agilent PlateLoc Sealer API",
-        version="1.3.1",
+        version=__version__,
         description=(
             "REST API for the Agilent PlateLoc Thermal Microplate Sealer. "
-            "Conforms to the AC lab equipment status spec v1.1 - see the "
-            "`docs/STATUS_SPEC.md` and `docs/STATUS_SPEC_v1_1.md` documents "
-            "in the ac-organic-lab monorepo."
+            "Conforms to the AC lab equipment status spec v1.2 - see "
+            "`docs/STATUS_SPEC.md` in the ac-organic-lab monorepo. The "
+            "device's primary operation (what `activity` reports) is a seal "
+            "cycle."
         ),
         lifespan=lifespan,
     )
@@ -401,9 +415,12 @@ def create_app(
             412: {
                 "description": (
                     "Layer-1 interlock refusal. Body is one of: "
-                    "stage-not-loaded (no Retry-After) or "
-                    "temperature-out-of-band (Retry-After in seconds when "
-                    "an estimate is available)."
+                    "stage-not-loaded (no Retry-After), "
+                    "recent-failure-not-cleared (Retry-After = the rest of "
+                    "the error window), or temperature-out-of-band "
+                    "(Retry-After in seconds when an estimate is available). "
+                    "Each shape is distinguishable by its fields, not by "
+                    "`detail` text."
                 )
             }
         },
@@ -431,6 +448,25 @@ def create_app(
                     "stage_state": exc.stage_state,
                     "required": "in",
                 },
+            )
+        except RecentFailureNotCleared as exc:
+            # Layer-1 health interlock (v1.4.0): §2.2 forbids starting a
+            # normal run while the device knows of an active fault. Recovery
+            # actions (stage moves, shutdown) stay available, so this refusal
+            # is not a dead end. Time-bounded → Retry-After.
+            raise _ClaimResponseException(
+                status_code=412,
+                payload={
+                    "detail": str(exc),
+                    "last_error_code": exc.last_error_code,
+                    "last_error_message": exc.last_error_message,
+                    "retry_after_s": exc.retry_after_s,
+                },
+                headers=(
+                    {"Retry-After": str(int(exc.retry_after_s))}
+                    if exc.retry_after_s is not None
+                    else {}
+                ),
             )
         except TemperatureOutOfBand as exc:
             # Layer-1 temperature interlock refusal. Returned as
