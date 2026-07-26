@@ -14,12 +14,51 @@ advisory mode) use the more explicit fixtures below.
 
 from __future__ import annotations
 
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 
 import pytest
 from fastapi.testclient import TestClient
 
 from agilent_plateloc_server.api import create_app
+
+
+@pytest.fixture
+def scrub() -> Callable[[dict], dict]:
+    """Replace runtime-volatile fields of a ``/status`` body with stable
+    placeholders, so the checked-in ``tests/fixtures/status_*.json`` snapshots
+    only diff when the schema or value semantics change.
+
+    Shared by both fixture writers (``test_api.py`` for the state-machine
+    snapshots, ``test_status_v12.py`` for the two activity snapshots) so a new
+    volatile field is scrubbed in one place, not two.
+    """
+
+    def _scrub(body: dict) -> dict:
+        body["device_time"] = "2026-04-29T22:50:01Z"
+        body["uptime_seconds"] = 0.0
+        body["host"] = "plateloc-pc"
+        # v1.2: the activity span start is wall-clock, like device_time.
+        if body.get("activity_since"):
+            body["activity_since"] = "2026-04-29T22:49:44Z"
+        for metric in body.get("metrics", {}).values():
+            if metric.get("timestamp"):
+                metric["timestamp"] = "2026-04-29T22:50:01Z"
+        details = body.get("details")
+        if isinstance(details, dict):
+            # Claim expiry and the two v1.2 detail stamps are wall-clock too.
+            if "claimed_by" in details:
+                details["claimed_by"]["expires_at"] = "2026-04-29T22:51:01Z"
+            for key in ("cycle_started_at", "readings_as_of"):
+                if key in details:
+                    details[key] = "2026-04-29T22:50:01Z"
+        # last_error.timestamp is set at the moment of failure — pin it so a
+        # re-run of the writer doesn't churn the file.
+        last_error = body.get("last_error")
+        if isinstance(last_error, dict) and last_error.get("timestamp"):
+            last_error["timestamp"] = "2026-04-29T22:50:01Z"
+        return body
+
+    return _scrub
 
 
 @pytest.fixture

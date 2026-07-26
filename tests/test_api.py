@@ -1,4 +1,7 @@
-"""Conformance tests for the lab equipment status spec v1.1.
+"""Conformance tests for the lab equipment status spec v1.0/v1.1 baseline.
+
+The v1.2 additions (activity, cycles_total, and the allowed_actions /
+refusal agreement that depends on them) live in ``test_status_v12.py``.
 
 These tests run with the dry-run stub driver so they require no Windows
 / ActiveX dependencies and can be executed in CI on any platform.
@@ -34,7 +37,7 @@ def test_probe(client: TestClient) -> None:
     assert body["equipment_id"] == "plateloc"
     assert body["equipment_name"] == "Agilent PlateLoc"
     assert body["protocol_version"] == PROTOCOL_VERSION
-    assert body["protocol_version"] == "1.1"
+    assert body["protocol_version"] == "1.2"
 
 
 def test_health(client: TestClient) -> None:
@@ -197,9 +200,14 @@ def test_allowed_actions_ready_state() -> None:
         assert "seal.stop" not in actions  # nothing to stop yet
 
 
-def test_allowed_actions_busy_state() -> None:
-    """busy advertises seal.stop and shutdown (and nothing that would
-    conflict with an in-flight cycle)."""
+def test_seal_start_returns_to_idle_when_the_cycle_completes() -> None:
+    """``StartCycle`` is blocking, so by the time POST /control/seal/start
+    has returned the cycle is over and the device is idle again.
+
+    The ``busy`` + ``activity: "running"`` envelope is therefore only
+    observable *during* the call — see ``test_status_v12.py``, which holds a
+    cycle open and polls ``/status`` from another thread.
+    """
     from agilent_plateloc_server.api import create_app
     from agilent_plateloc_server.service import _StubPlateLoc
 
@@ -216,11 +224,11 @@ def test_allowed_actions_busy_state() -> None:
         alt.post("/control/stage/in")
         alt.post("/control/seal/start", json={"temperature_c": 170, "seconds": 3.0})
         body = alt.get("/status").json()
-        assert body["equipment_status"] == "busy"
+        assert body["equipment_status"] == "ready"
+        assert body["activity"] == "idle"
         actions = set(body["allowed_actions"])
-        assert "seal.stop" in actions
-        assert "shutdown" in actions
-        assert "seal.start" not in actions  # already running
+        assert "seal.start" in actions  # a next cycle is available again
+        assert "seal.stop" not in actions  # nothing to stop
 
 
 # ---------------------------------------------------------------------------
@@ -1280,26 +1288,7 @@ def test_shutdown_then_control_returns_409(client: TestClient) -> None:
 # ---------------------------------------------------------------------------
 
 
-def _scrub_for_diff(body: dict) -> dict:
-    """Replace runtime-volatile fields with stable placeholders so the
-    saved fixtures only diff when the schema or value semantics change."""
-    body["device_time"] = "2026-04-29T22:50:01Z"
-    body["uptime_seconds"] = 0.0
-    body["host"] = "plateloc-pc"
-    for metric in body.get("metrics", {}).values():
-        if metric.get("timestamp"):
-            metric["timestamp"] = "2026-04-29T22:50:01Z"
-    # Claim expiry is wall-clock; scrub the same way as device_time.
-    if isinstance(body.get("details"), dict) and "claimed_by" in body["details"]:
-        body["details"]["claimed_by"]["expires_at"] = "2026-04-29T22:51:01Z"
-    # last_error.timestamp is wall-clock (set at the moment of failure)
-    # — pin it so a re-run of the fixture writer doesn't churn the file.
-    if isinstance(body.get("last_error"), dict) and body["last_error"].get("timestamp"):
-        body["last_error"]["timestamp"] = "2026-04-29T22:50:01Z"
-    return body
-
-
-def test_save_status_fixtures(unclaimed_client: TestClient) -> None:
+def test_save_status_fixtures(unclaimed_client: TestClient, scrub) -> None:
     """Re-generate ``tests/fixtures/status_*.json``.
 
     Fixtures are checked into git so reviewers can eyeball schema
@@ -1316,8 +1305,11 @@ def test_save_status_fixtures(unclaimed_client: TestClient) -> None:
       - status_ready_heating.json          - heater below band, seal.start ABSENT
       - status_ready_mid_cycle_failure.json - last_error populated, stage unknown (v1.3.0)
       - status_last_error_low_air_pressure.json - real-world taxonomy example (v1.3.1)
-      - status_busy.json                   - cycle in progress (uses stub driver)
       - status_dry_run.json                - dry-run mode advertised in /status
+
+    The two v1.2 activity snapshots — status_busy.json (busy + running) and
+    status_degraded.json — are written by ``test_status_v12.py``, which owns
+    the stub that can hold a seal cycle open.
     """
     from agilent_plateloc_server.api import create_app
     from agilent_plateloc_server.service import _StubPlateLoc
@@ -1339,7 +1331,7 @@ def test_save_status_fixtures(unclaimed_client: TestClient) -> None:
     del unclaimed_client.headers["X-Claim-Token"]
     body = unclaimed_client.get("/status").json()
     (FIXTURES / "status_dry_run.json").write_text(
-        json.dumps(_scrub_for_diff(body), indent=2, sort_keys=True) + "\n"
+        json.dumps(scrub(body), indent=2, sort_keys=True) + "\n"
     )
 
     # ready/busy: spin up a fresh service with the stub injected via
@@ -1367,7 +1359,7 @@ def test_save_status_fixtures(unclaimed_client: TestClient) -> None:
         assert body["components"]["stage"]["state"] == "unknown"
         assert "seal.start" not in body["allowed_actions"]
         (FIXTURES / "status_ready_stage_unknown.json").write_text(
-            json.dumps(_scrub_for_diff(body), indent=2, sort_keys=True) + "\n"
+            json.dumps(scrub(body), indent=2, sort_keys=True) + "\n"
         )
 
         # status_ready_stage_out: explicitly extended carriage. Stage
@@ -1381,7 +1373,7 @@ def test_save_status_fixtures(unclaimed_client: TestClient) -> None:
         assert "stage.in" in body["allowed_actions"]
         assert "stage.out" not in body["allowed_actions"]
         (FIXTURES / "status_ready_stage_out.json").write_text(
-            json.dumps(_scrub_for_diff(body), indent=2, sort_keys=True) + "\n"
+            json.dumps(scrub(body), indent=2, sort_keys=True) + "\n"
         )
 
         # Home the stage for the runnable snapshots.
@@ -1391,7 +1383,7 @@ def test_save_status_fixtures(unclaimed_client: TestClient) -> None:
         assert body["components"]["stage"]["state"] == "in"
         # Snapshot WITH the claim metadata so reviewers see the v1.1 shape.
         (FIXTURES / "status_ready_claimed.json").write_text(
-            json.dumps(_scrub_for_diff(body), indent=2, sort_keys=True) + "\n"
+            json.dumps(scrub(body), indent=2, sort_keys=True) + "\n"
         )
 
         # Snapshot WITHOUT claim metadata (back-compat with v1.0 readers).
@@ -1403,7 +1395,7 @@ def test_save_status_fixtures(unclaimed_client: TestClient) -> None:
         assert body["components"]["stage"]["state"] == "in"
         assert "seal.start" in body["allowed_actions"]
         (FIXTURES / "status_ready.json").write_text(
-            json.dumps(_scrub_for_diff(body), indent=2, sort_keys=True) + "\n"
+            json.dumps(scrub(body), indent=2, sort_keys=True) + "\n"
         )
 
         # heating snapshot: stage in (so only the temperature gate
@@ -1428,7 +1420,7 @@ def test_save_status_fixtures(unclaimed_client: TestClient) -> None:
         assert body["components"]["stage"]["state"] == "in"  # stage OK
         assert "seal.start" not in body["allowed_actions"]   # temp blocks
         (FIXTURES / "status_ready_heating.json").write_text(
-            json.dumps(_scrub_for_diff(body), indent=2, sort_keys=True) + "\n"
+            json.dumps(scrub(body), indent=2, sort_keys=True) + "\n"
         )
 
         # status_ready_mid_cycle_failure: stage was homed, but a fake
@@ -1451,7 +1443,7 @@ def test_save_status_fixtures(unclaimed_client: TestClient) -> None:
         assert body["components"]["stage"]["state"] == "unknown"
         assert body["last_error"] is not None
         (FIXTURES / "status_ready_mid_cycle_failure.json").write_text(
-            json.dumps(_scrub_for_diff(body), indent=2, sort_keys=True) + "\n"
+            json.dumps(scrub(body), indent=2, sort_keys=True) + "\n"
         )
 
         # v1.3.1: real-world taxonomy example. Drive a low-air-pressure
@@ -1485,11 +1477,14 @@ def test_save_status_fixtures(unclaimed_client: TestClient) -> None:
         body = alt.get("/status").json()
         assert body["last_error"]["code"] == "low_air_pressure"
         (FIXTURES / "status_last_error_low_air_pressure.json").write_text(
-            json.dumps(_scrub_for_diff(body), indent=2, sort_keys=True) + "\n"
+            json.dumps(scrub(body), indent=2, sort_keys=True) + "\n"
         )
 
-        # busy snapshot: home stage again (mid-cycle failure left it
-        # unknown), heal temperature, restart cleanly.
+        # A completed cycle: home the stage again (the mid-cycle failure
+        # above left it unknown), heal the temperature, run one cleanly.
+        # This is the post-cycle shape — the in-flight `busy` + `running`
+        # snapshot needs a cycle held open, so `status_busy.json` and
+        # `status_degraded.json` are written by `test_status_v12.py`.
         alt.post("/control/stage/in")
         heating_driver._set_temp = 170
         heating_driver._actual_temp = 170
@@ -1497,10 +1492,9 @@ def test_save_status_fixtures(unclaimed_client: TestClient) -> None:
             "/control/seal/start", json={"temperature_c": 170, "seconds": 3.0}
         )
         body = alt.get("/status").json()
-        assert body["equipment_status"] == "busy"
-        (FIXTURES / "status_busy.json").write_text(
-            json.dumps(_scrub_for_diff(body), indent=2, sort_keys=True) + "\n"
-        )
+        assert body["equipment_status"] == "ready"
+        assert body["activity"] == "idle"
+        assert body["metrics"]["cycles_total"]["value"] >= 1
 
     # requires_init: shut the dry-run driver down explicitly.
     r = unclaimed_client.post(
@@ -1517,5 +1511,5 @@ def test_save_status_fixtures(unclaimed_client: TestClient) -> None:
     body = unclaimed_client.get("/status").json()
     assert body["equipment_status"] == "requires_init"
     (FIXTURES / "status_requires_init.json").write_text(
-        json.dumps(_scrub_for_diff(body), indent=2, sort_keys=True) + "\n"
+        json.dumps(scrub(body), indent=2, sort_keys=True) + "\n"
     )

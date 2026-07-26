@@ -32,6 +32,7 @@ import time
 from datetime import datetime, timezone
 from typing import Any, Awaitable, Callable
 
+from . import __version__
 from . import config as _config
 from .claims import ClaimStore
 from .models import (
@@ -46,12 +47,21 @@ logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
-# allowed_actions per equipment_status (v1.1)
+# allowed_actions — one pure function, consulted by both surfaces
 #
-# Mirrors the inverse of the SDK skill catalog's `requires_states` for
-# `kind=plate_sealer` (see lab_skills/skill_catalog/plate_sealer.py). Kept
-# here so the device is the source of truth: the SDK prefers our
-# allowed_actions over its own catalog whenever the field is non-empty.
+# Skill names mirror the SDK skill catalog for `kind=plate_sealer` (see
+# lab_skills/skill_catalog/plate_sealer.py). The device is the source of
+# truth: the SDK prefers our allowed_actions over its own catalog
+# `requires_states` whenever the field is non-empty.
+#
+# §6.2 single-source-of-truth: the seal.start entry is gated by the SAME
+# `evaluate_*_interlock` helpers the `/control/seal/start` 412 path uses, so
+# the advertised list and the refusals cannot drift.
+#
+# v1.2 (§2.3): the list must agree with `activity` as well as with the
+# top-level state. While a seal cycle is executing, everything that would
+# start a *second* run or move the carriage is withheld; the abort/stop class
+# stays listed so an abort is always reachable.
 # ---------------------------------------------------------------------------
 
 _ALL_PLATE_SEALER_SKILLS = [
@@ -65,24 +75,76 @@ _ALL_PLATE_SEALER_SKILLS = [
     "stage.out",
 ]
 
-_ALLOWED_ACTIONS_BY_STATE: dict[str, list[str]] = {
-    "requires_init": ["startup"],
-    "ready": [
-        "startup",
-        "shutdown",
-        "seal.start",
-        "seal.set_temperature",
-        "seal.set_time",
-        "stage.in",
-        "stage.out",
-    ],
-    "busy": ["shutdown", "seal.stop"],
-    "degraded": ["shutdown"],
-    "error": ["shutdown"],
-    "e_stop": [],
-    "unknown": [],
-    "dry_run": list(_ALL_PLATE_SEALER_SKILLS),
-}
+#: Offered while the device is initialized, healthy and idle, in catalog
+#: order. `seal.stop` is deliberately absent — there is nothing to stop.
+_IDLE_SKILLS = [
+    "startup",
+    "shutdown",
+    "seal.start",
+    "seal.set_temperature",
+    "seal.set_time",
+    "stage.in",
+    "stage.out",
+]
+
+#: Offered while `activity == "running"`: abort/stop class only (§2.3).
+_RUNNING_SKILLS = ["shutdown", "seal.stop"]
+
+
+def _compute_allowed_actions(
+    state: str,
+    activity: str,
+    *,
+    stage_state: str,
+    seal_start_blocked: bool,
+) -> list[str]:
+    """The device's authoritative "what would I honor right now" list.
+
+    Rules:
+
+    * ``requires_init`` → only ``startup``.
+    * ``e_stop`` / ``unknown`` → nothing.
+    * ``activity == "running"`` → no second concurrent cycle and no
+      carriage move while the press is down: ``shutdown`` + ``seal.stop``
+      (§2.3). Checked *before* the health branches so a fault that lands
+      mid-cycle cannot take the abort action away.
+    * otherwise the idle set, minus ``seal.start`` when any of the three §6
+      interlocks would refuse it, minus the no-op stage direction.
+
+    ``error`` and ``degraded`` deliberately do **not** collapse to
+    ``["shutdown"]`` (which is what this device advertised through v1.3.2).
+    Two reasons. §2.2 says the run-blocking fault must remove the *run*,
+    while "recovery, abort, standby, and diagnostic actions may remain
+    available when safe" — and after a failed cycle the operator's recovery
+    is exactly ``stage.out`` (retrieving the plate from a hot chamber), which
+    the old list withheld while the endpoint honored it anyway. That
+    mismatch was also a §6.2 violation: ``/status`` omitted actions the
+    device would have performed. The run itself is gated instead by
+    :meth:`PlateLocService.evaluate_health_interlock`, which the
+    ``/control/seal/start`` 412 path shares.
+    """
+    if state == "requires_init":
+        return ["startup"]
+    if state in ("e_stop", "unknown"):
+        return []
+    if activity == "running":
+        return list(_RUNNING_SKILLS)
+
+    allowed = [
+        skill
+        for skill in _IDLE_SKILLS
+        if not (skill == "seal.start" and seal_start_blocked)
+    ]
+    # Stage move dedup: don't advertise the no-op direction. A POST to the
+    # "already there" direction is still accepted (the device treats it as a
+    # 200 no-op); we just leave it out so an operator UI doesn't render a
+    # redundant button. Asymmetry vs seal.start is deliberate: a redundant
+    # stage move is harmless, sealing without a plate wastes hot air.
+    if stage_state == "in":
+        allowed = [s for s in allowed if s != "stage.in"]
+    elif stage_state == "out":
+        allowed = [s for s in allowed if s != "stage.out"]
+    return allowed
 
 
 def _coerce_float(value: Any) -> float | None:
@@ -137,10 +199,14 @@ class _StubPlateLoc:
         return 0
 
     def start_cycle(self) -> int:
+        # The real control runs blocking (``PlateLoc(blocking=True)``): the
+        # call returns when the physical cycle is done, and the instrument's
+        # odometer has advanced by one. The stub mirrors both.
+        self._cycle_count += 1
         return 0
 
     def stop_cycle(self) -> int:
-        self._cycle_count += 1
+        # Stopping is not a completed cycle — the odometer does not move.
         return 0
 
     def move_stage_in(self) -> int:
@@ -240,10 +306,25 @@ def _classify_error(
     """
     if isinstance(exc, (KeyError, AttributeError, TypeError, NameError)):
         return "process_internal"
+    return _classify_error_text(
+        method_name,
+        f"{detail or ''} {exc}",
+        is_timeout=isinstance(exc, TimeoutError),
+    )
 
-    detail_text = (detail or "").lower()
-    exc_text = str(exc).lower()
-    haystack = f"{detail_text} {exc_text}"
+
+def _classify_error_text(
+    method_name: str, text: str, *, is_timeout: bool = False
+) -> str:
+    """Classify a fault from its message text (steps 2-5 of
+    :func:`_classify_error`).
+
+    Split out so a *readback* fault observed while composing ``/status`` —
+    which has a message but no exception object — lands on the same stable
+    taxonomy as an operational failure, instead of reaching clients only as
+    free text they would have to regex (best-practice #6).
+    """
+    haystack = text.lower()
 
     # Profile mis-config: only meaningful at startup time. The
     # PlateLoc driver wraps Initialize() failures with the available
@@ -274,7 +355,7 @@ def _classify_error(
         return "heater_undertemp"
 
     # Timeouts: TimeoutError type OR "timeout"/"timed out" substring.
-    if isinstance(exc, TimeoutError) or "timeout" in haystack or "timed out" in haystack:
+    if is_timeout or "timeout" in haystack or "timed out" in haystack:
         return "com_timeout"
 
     # Context fallbacks — used when the text alone isn't decisive.
@@ -284,6 +365,34 @@ def _classify_error(
         return "com_init_failed"
 
     return "com_other"
+
+
+def _readback_error_info(
+    readback_errors: list[str], now: datetime
+) -> ErrorInfo | None:
+    """Synthesize ``last_error`` from an active readback fault.
+
+    A failed instrument readback is a real, diagnosable fault, but it is not
+    an *operational* failure — nothing was executing, so it never touched
+    ``self._last_error`` and reached ``/status`` only as free text in
+    ``message``. Identifying it meant string-matching that text, exactly what
+    best-practice #6 warns against.
+
+    Severity is ``warning``, not ``error``: §2.2 already carries the safety
+    consequence by putting the top-level state at ``degraded``, and a useful
+    subset of capability remains. This mirrors the reference shaker envelope
+    in STATUS_SPEC §10.
+    """
+    if not readback_errors:
+        return None
+    # Readback strings are "<label>: <exception>" (see _read_driver_metrics).
+    _, _, detail = readback_errors[0].partition(": ")
+    return ErrorInfo(
+        code=_classify_error_text("status_readback", detail or readback_errors[0]),
+        message="; ".join(readback_errors),
+        severity="warning",
+        timestamp=now,
+    )
 
 
 class TemperatureOutOfBand(Exception):
@@ -308,6 +417,34 @@ class TemperatureOutOfBand(Exception):
         self.actual_c = actual_c
         self.setpoint_c = setpoint_c
         self.tolerance_c = tolerance_c
+        self.retry_after_s = retry_after_s
+
+
+class RecentFailureNotCleared(Exception):
+    """Raised by ``start_cycle`` while an operational failure is still recent.
+
+    Layer-1 interlock (v1.4.0), the third of three and the one §2.2 asks for
+    directly: do not start a normal run while the device knows of an active
+    fault. It gates ``seal.start`` **only** — recovery, abort and diagnostic
+    actions stay available, which is what lets an operator drive
+    ``stage.out`` after a mid-cycle air failure instead of being offered
+    nothing but ``shutdown``.
+
+    Clears exactly as ``last_error`` does (§6.4): the first 2xx from any
+    operational endpoint drops it, and the window expires on its own.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        last_error_code: str | None,
+        last_error_message: str,
+        retry_after_s: float | None,
+    ) -> None:
+        super().__init__(message)
+        self.last_error_code = last_error_code
+        self.last_error_message = last_error_message
         self.retry_after_s = retry_after_s
 
 
@@ -390,11 +527,38 @@ class PlateLocService:
         self.dry_run = dry_run
         self._driver_factory = driver_factory
         self._driver: Any | None = None
+        # Two locks, ordered state -> io (nothing takes the state lock while
+        # holding io):
+        #
+        # * ``_lock`` — state lock. Guards the in-memory bookkeeping
+        #   (driver presence, busy/stage/activity, last_error). Never held
+        #   across a slow COM transaction, so a ``/status`` poll cannot
+        #   queue behind a seal cycle. That is what makes v1.2 ``activity``
+        #   observable at all: ``StartCycle`` blocks for the whole cycle,
+        #   and a reader that had to wait for the state lock would only ever
+        #   see the device before or after it, never `running`.
+        # * ``_io_lock`` — COM channel lock. Held around every instrument
+        #   transaction: the ActiveX control is single-threaded and the
+        #   32-bit surrogate serves one request at a time over its pipe.
         self._lock = asyncio.Lock()
+        self._io_lock = asyncio.Lock()
         self._started_at = time.monotonic()
         self._last_error: ErrorInfo | None = None
         self._busy_state: bool = False
         self._connect_profile: str | None = None
+        # Activity span tracking (STATUS_SPEC v1.2 §2.3). ``_activity`` is
+        # the last observed value; ``_activity_since`` is the instant it last
+        # changed. Both are stamped by the methods that own the transition
+        # (start_cycle / stop_cycle / startup / shutdown); ``_compose_status``
+        # only reconciles.
+        self._activity: str = "unknown"
+        self._activity_since: datetime | None = None
+        self._cycle_started_at: datetime | None = None
+        # Last successful instrument readback, reused while a seal cycle owns
+        # the COM channel (see ``get_status``).
+        self._readings: dict[str, Any] = {}
+        self._readback_errors: list[str] = []
+        self._readings_at: datetime | None = None
         # Stage position is command-tracked (the COM API has no
         # GetStagePosition equivalent). Defaults to "unknown" at process
         # start; the operator homes it via /control/stage/{in,out}. See
@@ -421,8 +585,11 @@ class PlateLocService:
             "dashboard", "equipment_name", "Agilent PlateLoc"
         )
         self.equipment_kind = "plate_sealer"
-        self.equipment_version: str | None = _config.get(
-            "dashboard", "equipment_version", None
+        # Fall back to the package version rather than publishing null: an
+        # unset `[dashboard] equipment_version` should not cost the dashboard
+        # the ability to tell which build the device is running.
+        self.equipment_version: str | None = (
+            _config.get("dashboard", "equipment_version", None) or __version__
         )
 
     # ---- lifecycle ---------------------------------------------------------
@@ -455,7 +622,7 @@ class PlateLocService:
             self._driver = self._create_driver()
             self._connect_profile = profile
             try:
-                await asyncio.to_thread(self._driver.connect, profile)
+                await self._io(self._driver.connect, profile)
             except Exception as exc:
                 # `connect()` already calls get_last_error() and folds the
                 # detail into the exception text on the Initialize-failed
@@ -466,6 +633,10 @@ class PlateLocService:
                 self._record_error(exc, "startup", detail=detail)
                 # keep self._driver around so retries reuse the same instance
                 raise
+            self._invalidate_readings()
+            # A freshly connected sealer is not cycling (§2.3 pins
+            # requires_init ⇒ idle; this is the transition out of it).
+            self._note_activity("idle")
 
     async def shutdown(self) -> None:
         """Best-effort disconnect. Never raises.
@@ -481,15 +652,21 @@ class PlateLocService:
                 # "we cannot vouch for the carriage position" — same
                 # rationale as a fresh process start.
                 self._stage_state = "unknown"
+                self._note_activity("idle")
                 return
             try:
-                await asyncio.to_thread(self._driver.close)
+                await self._io(self._driver.close)
             except Exception:
                 logger.exception("Error while closing driver")
             finally:
                 self._driver = None
                 self._busy_state = False
+                self._cycle_started_at = None
                 self._stage_state = "unknown"
+                self._invalidate_readings()
+                # Disconnected hardware cannot be sealing under our control;
+                # §2.3 pins requires_init ⇒ idle.
+                self._note_activity("idle")
 
     # ---- control -----------------------------------------------------------
 
@@ -506,7 +683,21 @@ class PlateLocService:
         )
 
     async def start_cycle(self) -> None:
-        """Start a seal cycle.
+        """Run one seal cycle.
+
+        The ActiveX control is configured in **blocking** mode
+        (``PlateLoc(blocking=True)``), so ``StartCycle`` returns only when
+        the physical cycle has finished. The seal cycle — this device's
+        primary operation — is therefore exactly the span of that COM call,
+        and that is the span v1.2 reports as ``activity: "running"`` (§2.3).
+        Two consequences shape the code below:
+
+        * The state lock is **not** held across the call. It used to be,
+          which meant a ``/status`` poll queued behind the whole cycle and
+          no reader could ever observe the device while it was sealing.
+        * ``_busy_state`` is set before the call and cleared after it (on
+          both the success and failure paths), instead of being latched on
+          afterwards until an explicit ``/control/seal/stop``.
 
         Two layer-1 interlocks fire before the hardware moves:
 
@@ -527,33 +718,75 @@ class PlateLocService:
         entry so a mid-cycle failure (driver fault after the
         physical commit started) leaves a truthful state instead of
         a stale ``"in"``.
+
+        Raises
+        ------
+        RuntimeError
+            Driver not connected, or a cycle is already in flight. Both are
+            device-state conflicts (HTTP 409), not precondition refusals —
+            see STATUS_SPEC §6.1 on 409-vs-412.
+        StageNotLoaded, RecentFailureNotCleared, TemperatureOutOfBand
+            Layer-1 interlock refusals (HTTP 412), checked in that order:
+            the two in-memory gates before the one that needs COM reads.
         """
-        # Inlined (not via ``_do``) so the precondition checks and the
-        # ``StartCycle`` COM call sit inside a single critical section.
         async with self._lock:
-            if self._driver is None or not self._driver_connected():
+            driver = self._driver
+            if driver is None or not self._driver_connected():
                 raise RuntimeError(
                     "PlateLoc is not connected. POST /control/startup first."
                 )
-            # Stage gate first (cheap; in-memory). Temperature gate
-            # second (requires async COM reads). allowed_actions is
-            # built from the same two helpers, so the surfaces agree.
+            self._assert_not_busy()
+            # In-memory gates first (cheap): stage position, then an
+            # uncleared recent failure.
             self._assert_stage_loaded()
-            await self._assert_temperature_in_band()
-            # Both pre-flights passed; from here on the COM call may
+            self._assert_failure_cleared(self._last_error)
+
+        # Temperature gate second: it needs COM reads, which must not run
+        # under the state lock. Both gates use the same
+        # ``evaluate_*_interlock`` helpers that build allowed_actions, so the
+        # two surfaces agree (§6.2).
+        await self._assert_temperature_in_band(driver)
+
+        async with self._lock:
+            # Re-check after the reads: the driver may have gone away and a
+            # racing caller may have taken the cycle in the meantime.
+            if self._driver is not driver or not self._driver_connected():
+                raise RuntimeError(
+                    "PlateLoc disconnected during seal-cycle pre-flight."
+                )
+            self._assert_not_busy()
+            self._assert_stage_loaded()
+            self._assert_failure_cleared(self._last_error)
+            # Every pre-flight passed; from here on the COM call may
             # mutate physical stage position. Pessimize.
             self._stage_state = "unknown"
-            try:
-                await asyncio.to_thread(self._driver.start_cycle)
-            except Exception as exc:
-                detail = await self._read_driver_last_error()
+            self._busy_state = True
+            self._cycle_started_at = datetime.now(timezone.utc)
+            self._note_activity("running")  # exact span start (§2.3)
+
+        try:
+            await self._io(driver.start_cycle)
+        except Exception as exc:
+            detail = await self._read_driver_last_error()
+            async with self._lock:
+                self._busy_state = False
+                self._cycle_started_at = None
+                self._note_activity("idle")
+                self._invalidate_readings()
                 self._record_error(exc, "start_cycle", detail=detail)
                 # Leave _stage_state as "unknown" — the cycle aborted
                 # mid-motion and the carriage position is no longer
                 # tracked.
-                raise
+            raise
+
+        async with self._lock:
+            self._busy_state = False
+            self._cycle_started_at = None
+            self._note_activity("idle")
             self._stage_state = "in"
-        self._busy_state = True
+            # The instrument's odometer just advanced; drop the cached
+            # readback so the next poll reports the new cycles_total.
+            self._invalidate_readings()
 
     def evaluate_temperature_interlock(
         self,
@@ -644,6 +877,75 @@ class PlateLocService:
             "required": "in",
         }
 
+    def evaluate_health_interlock(
+        self,
+        last_error: ErrorInfo | None,
+    ) -> tuple[bool, dict[str, Any] | None]:
+        """Single source of truth for the recent-failure interlock.
+
+        Returns ``(should_block, body_for_412)``, the same contract as
+        :meth:`evaluate_stage_interlock` and
+        :meth:`evaluate_temperature_interlock`, so all three compose
+        uniformly at ``/control/seal/start`` and in the ``/status``
+        ``allowed_actions`` builder (§6.2).
+
+        Blocks while ``last_error`` is inside the recent-error window — the
+        same window that puts the device in ``equipment_status: "error"``, so
+        the two surfaces cannot disagree about whether a run is available.
+        Recovery is time-bounded (or immediate, via §6.4's auto-clear on the
+        next successful action), so the body carries ``retry_after_s``.
+        """
+        if last_error is None:
+            return False, None
+        elapsed = (
+            datetime.now(timezone.utc) - last_error.timestamp
+        ).total_seconds()
+        remaining = _RECENT_ERROR_WINDOW_S - elapsed
+        if remaining <= 0:
+            return False, None
+        return True, {
+            "detail": "Recent operational failure not cleared",
+            "last_error_code": last_error.code,
+            "last_error_message": last_error.message,
+            "retry_after_s": max(1.0, round(remaining)),
+        }
+
+    def _assert_failure_cleared(self, last_error: ErrorInfo | None) -> None:
+        """Raise :class:`RecentFailureNotCleared` if the health interlock
+        would block a seal cycle right now.
+
+        Caller MUST already hold ``self._lock``. Synchronous — the decision
+        is in-memory.
+        """
+        blocks, body = self.evaluate_health_interlock(last_error)
+        if not blocks:
+            return
+        assert body is not None  # invariant: blocks=True implies a body
+        raise RecentFailureNotCleared(
+            body["detail"],
+            last_error_code=body["last_error_code"],
+            last_error_message=body["last_error_message"],
+            retry_after_s=body["retry_after_s"],
+        )
+
+    def _assert_not_busy(self) -> None:
+        """Raise ``RuntimeError`` (→ HTTP 409) if a seal cycle is in flight.
+
+        Mirrors the ``activity == "running"`` gate in
+        :func:`_compute_allowed_actions`: while the device advertises only
+        the abort/stop class, anything that would start a second run or move
+        the carriage is refused. A concurrency conflict is a device-state
+        conflict, so it keeps the 409 path rather than becoming a §6.1
+        precondition 412.
+
+        Caller MUST already hold ``self._lock``.
+        """
+        if self._busy_state:
+            raise RuntimeError(
+                "A seal cycle is in progress. Wait for it to finish "
+                "(or POST /control/seal/stop)."
+            )
+
     def _assert_stage_loaded(self) -> None:
         """Raise :class:`StageNotLoaded` if the stage interlock would
         block a seal cycle right now.
@@ -657,18 +959,19 @@ class PlateLocService:
         assert body is not None  # invariant: blocks=True implies a body
         raise StageNotLoaded(body["detail"], stage_state=body["stage_state"])
 
-    async def _assert_temperature_in_band(self) -> None:
+    async def _assert_temperature_in_band(self, driver: Any) -> None:
         """Raise :class:`TemperatureOutOfBand` if the temperature
         interlock would block a seal cycle right now.
 
-        Caller MUST already hold ``self._lock``. Uses ``asyncio.to_thread``
-        for the (blocking) COM reads so the event loop is not pinned
-        while the surrogate replies. The decision itself is delegated
-        to :meth:`evaluate_temperature_interlock` so this path stays in
-        lockstep with the ``/status`` ``allowed_actions`` gate.
+        Caller MUST NOT hold ``self._lock``: the two COM reads go through
+        :meth:`_io` (worker thread, COM-channel lock), and holding the state
+        lock across instrument I/O would stall ``/status`` polls. The
+        decision itself is delegated to
+        :meth:`evaluate_temperature_interlock` so this path stays in lockstep
+        with the ``/status`` ``allowed_actions`` gate.
         """
-        actual_raw = await asyncio.to_thread(self._driver.get_actual_temperature)
-        setpoint_raw = await asyncio.to_thread(self._driver.get_sealing_temperature)
+        actual_raw = await self._io(driver.get_actual_temperature)
+        setpoint_raw = await self._io(driver.get_sealing_temperature)
 
         blocks, body = self.evaluate_temperature_interlock(
             _coerce_float(actual_raw), _coerce_float(setpoint_raw)
@@ -685,8 +988,23 @@ class PlateLocService:
         )
 
     async def stop_cycle(self) -> None:
-        await self._do("stop_cycle", lambda d: d.stop_cycle())
-        self._busy_state = False
+        """Stop the current seal cycle. Idempotent — stopping when nothing
+        is running is a 2xx no-op.
+
+        This is the abort-class action, so it is the one control call the
+        device still honors while ``activity == "running"``. Note that with
+        the control in blocking mode the in-flight ``StartCycle`` owns the
+        COM channel: a stop issued mid-cycle is serialised behind it and
+        lands as soon as that call returns.
+        """
+        await self._do(
+            "stop_cycle", lambda d: d.stop_cycle(), allow_while_busy=True
+        )
+        async with self._lock:
+            self._busy_state = False
+            self._cycle_started_at = None
+            self._note_activity("idle")
+            self._invalidate_readings()
 
     async def move_stage_in(self) -> None:
         """Move the plate carriage to the loaded position.
@@ -720,9 +1038,13 @@ class PlateLocService:
                 raise RuntimeError(
                     "PlateLoc is not connected. POST /control/startup first."
                 )
+            # The carriage cannot move while the press is down (the
+            # instrument itself reports "Stage cannot move - press is down").
+            # Refuse up front so the advertised list and the refusals agree.
+            self._assert_not_busy()
             self._stage_state = "unknown"
             try:
-                await asyncio.to_thread(getattr(self._driver, com_method))
+                await self._io(getattr(self._driver, com_method))
             except Exception as exc:
                 detail = await self._read_driver_last_error()
                 self._record_error(exc, com_method, detail=detail)
@@ -731,14 +1053,28 @@ class PlateLocService:
                 raise
             self._stage_state = target
 
-    async def _do(self, name: str, fn: Callable[[Any], Any]) -> None:
+    async def _do(
+        self,
+        name: str,
+        fn: Callable[[Any], Any],
+        *,
+        allow_while_busy: bool = False,
+    ) -> None:
+        """Run one driver call under the state lock, recording failures.
+
+        ``allow_while_busy`` is for the abort class only (``stop_cycle``):
+        every other action is refused mid-cycle, matching the
+        ``activity == "running"`` gate in :func:`_compute_allowed_actions`.
+        """
         async with self._lock:
             if self._driver is None or not self._driver_connected():
                 raise RuntimeError(
                     "PlateLoc is not connected. POST /control/startup first."
                 )
+            if not allow_while_busy:
+                self._assert_not_busy()
             try:
-                await asyncio.to_thread(fn, self._driver)
+                await self._io(fn, self._driver)
             except Exception as exc:
                 # Best-effort: pull the human-readable message out of the
                 # ActiveX control via GetLastError so operators see what
@@ -761,7 +1097,7 @@ class PlateLocService:
         if getter is None:
             return None
         try:
-            result = await asyncio.to_thread(getter)
+            result = await self._io(getter)
         except Exception:
             return None
         if result is None:
@@ -779,28 +1115,83 @@ class PlateLocService:
         is broken. We therefore catch every per-getter failure and fold
         it into ``equipment_status: degraded`` rather than raising.
 
-        v1.1 fields (``allowed_actions``, ``details.claimed_by``) are
-        attached *after* the COM lock is released; the claim store has
-        its own (cheap) async lock and we want polling status to never
-        block behind long-running control operations.
+        The state lock is held only long enough to snapshot the in-memory
+        bookkeeping. The instrument readback then runs outside it, on a
+        worker thread, under the COM-channel lock — so a poll cannot stall a
+        concurrent ``/control/*`` call, and (crucially for v1.2) a poll
+        issued *during* a seal cycle answers instead of queueing behind the
+        blocking ``StartCycle``.
+
+        v1.1 ``details.claimed_by`` is attached last; the claim store has its
+        own (cheap) async lock.
         """
         async with self._lock:
-            status = self._build_status()
-        # NB: ``self.claims.current()`` is its own async coroutine that
-        # takes the claim store's internal lock. Calling it outside the
-        # COM lock means a slow seal cycle does not stall /status polling.
+            driver = self._driver
+            connected = self._driver_connected()
+            busy = self._busy_state
+            stage_state = self._stage_state
+            last_error = self._last_error
+            cycle_started_at = self._cycle_started_at
+
+        if driver is None or not connected:
+            readings: dict[str, Any] = {}
+            readback_errors: list[str] = []
+            readings_at: datetime | None = None
+            stale = False
+        elif busy:
+            # A seal cycle owns the COM channel: reading now would queue
+            # behind the blocking StartCycle and the poll would return only
+            # after the cycle ended (or time out at the dashboard). Serve the
+            # last observation instead, stamped with when it was taken, so
+            # the reader still gets a truthful `busy` + `running` envelope.
+            readings, readback_errors, readings_at = self._last_readings()
+            stale = readings_at is not None
+        else:
+            readings, readback_errors = await self._io(
+                _read_driver_metrics, driver
+            )
+            readings_at = datetime.now(timezone.utc)
+            self._store_readings(readings, readback_errors, readings_at)
+            stale = False
+
+        status = self._compose_status(
+            connected=connected,
+            busy=busy,
+            stage_state=stage_state,
+            last_error=last_error,
+            cycle_started_at=cycle_started_at,
+            readings=readings,
+            readback_errors=readback_errors,
+            readings_at=readings_at,
+            readings_stale=stale,
+        )
         claimed_by = await self.claims.current()
         if claimed_by is not None:
             status.details["claimed_by"] = claimed_by.model_dump(mode="json")
         return status
 
-    def _build_status(self) -> EquipmentStatus:
+    def _compose_status(
+        self,
+        *,
+        connected: bool,
+        busy: bool,
+        stage_state: str,
+        last_error: ErrorInfo | None,
+        cycle_started_at: datetime | None,
+        readings: dict[str, Any],
+        readback_errors: list[str],
+        readings_at: datetime | None,
+        readings_stale: bool,
+    ) -> EquipmentStatus:
         now = datetime.now(timezone.utc)
         uptime = time.monotonic() - self._started_at
         host = socket.gethostname()
 
         # ---- not connected: requires_init --------------------------------
-        if self._driver is None or not self._driver_connected():
+        if not connected:
+            # §2.3 invariant: requires_init ⇒ idle. Disconnected hardware
+            # cannot be sealing under our control.
+            self._note_activity("idle")
             return EquipmentStatus(
                 protocol_version=PROTOCOL_VERSION,
                 equipment_id=self.equipment_id,
@@ -811,33 +1202,36 @@ class PlateLocService:
                 equipment_status="requires_init",
                 message="Driver not connected. POST /control/startup to initialize.",
                 required_actions=["startup"],
-                allowed_actions=list(_ALLOWED_ACTIONS_BY_STATE["requires_init"]),
+                allowed_actions=_compute_allowed_actions(
+                    "requires_init",
+                    "idle",
+                    stage_state="unknown",
+                    seal_start_blocked=True,
+                ),
+                activity="idle",
+                activity_since=self._activity_since,
                 device_time=now,
                 uptime_seconds=uptime,
-                last_error=self._last_error,
+                last_error=last_error,
             )
 
-        # ---- read what we can; never let a single getter fail status -----
+        # ---- fold the readback (taken by the caller) into the envelope ----
         metrics: dict[str, MetricValue] = {}
         details: dict[str, Any] = {}
-        readback_errors: list[str] = []
+        # Metric timestamps carry the instant the values were *read*, which
+        # is not `now` when a seal cycle owns the COM channel and we are
+        # serving the last observation.
+        read_at = readings_at or now
 
-        def _read(label: str, fn: Callable[[], Any]) -> Any:
-            try:
-                return fn()
-            except Exception as exc:
-                readback_errors.append(f"{label}: {exc}")
-                return None
-
-        actual_temp = _read("actual_temperature", self._driver.get_actual_temperature)
+        actual_temp = readings.get("actual_temperature")
         if actual_temp is not None:
             metrics["actual_temperature"] = MetricValue(
-                value=actual_temp, unit="C", timestamp=now
+                value=actual_temp, unit="C", timestamp=read_at
             )
-        setpoint = _read("setpoint_temperature", self._driver.get_sealing_temperature)
+        setpoint = readings.get("setpoint_temperature")
         if setpoint is not None:
             metrics["setpoint_temperature"] = MetricValue(
-                value=setpoint, unit="C", timestamp=now
+                value=setpoint, unit="C", timestamp=read_at
             )
 
         # Synthesized: signed delta and heater state. The ActiveX has no
@@ -854,34 +1248,39 @@ class PlateLocService:
             heater_temp_delta = None
         if heater_temp_delta is not None:
             metrics["temperature_delta_c"] = MetricValue(
-                value=round(heater_temp_delta, 1), unit="C", timestamp=now
+                value=round(heater_temp_delta, 1), unit="C", timestamp=read_at
             )
-        seal_time = _read("sealing_time", self._driver.get_sealing_time)
+        seal_time = readings.get("sealing_time")
         if seal_time is not None:
             metrics["sealing_time"] = MetricValue(
-                value=seal_time, unit="s", timestamp=now
+                value=seal_time, unit="s", timestamp=read_at
             )
-        cycle_count = _read("cycle_count", self._driver.get_cycle_count)
+        cycle_count = readings.get("cycle_count")
         if cycle_count is not None:
+            # `cycle_count` is the instrument's lifetime odometer, kept
+            # unchanged for existing readers. `cycles_total` is the spec's
+            # reserved key for the same number (§2.3.1): a seal cycle lasts
+            # a few seconds, far under the dashboard's 60 s poll, so the
+            # poll-to-poll delta of this counter is the *only* way a reader
+            # can account for cycles it slept through. A lifetime hardware
+            # counter satisfies the monotonic semantics by construction.
             metrics["cycle_count"] = MetricValue(value=cycle_count, unit="count")
+            metrics["cycles_total"] = MetricValue(value=cycle_count, unit="count")
 
-        firmware = _read("firmware_version", self._driver.get_firmware_version)
+        firmware = readings.get("firmware_version")
         if firmware:
             details["firmware_version"] = firmware
-        ax_version = _read("activex_version", self._driver.get_version)
+        ax_version = readings.get("activex_version")
         if ax_version:
             details["activex_version"] = ax_version
         if self._connect_profile:
             details["profile"] = self._connect_profile
-        com_port = getattr(self._driver, "com_port", None)
+        com_port = readings.get("com_port")
         if com_port:
             details["com_port"] = com_port
 
         # ---- components --------------------------------------------------
-        connected = self._driver_connected()
-        sealer_state = (
-            "busy" if self._busy_state else ("idle" if connected else "disconnected")
-        )
+        sealer_state = "busy" if busy else "idle"
 
         # Heater state is derived from the temperature delta against the
         # configured tolerance. "stable" means the plate is at setpoint
@@ -889,10 +1288,8 @@ class PlateLocService:
         # at the requested temperature. "heating"/"cooling" mean it is
         # not yet there. "unknown" covers the case where one of the
         # readings could not be obtained.
-        if not connected:
-            heater_state = "disconnected"
-            heater_message: str | None = None
-        elif heater_temp_delta is None:
+        heater_message: str | None
+        if heater_temp_delta is None:
             heater_state = "unknown"
             heater_message = None
         elif abs(heater_temp_delta) <= self._temp_tolerance_c:
@@ -905,12 +1302,11 @@ class PlateLocService:
             heater_state = "cooling"
             heater_message = f"Cooling {actual_temp} -> {setpoint} C"
 
-        # Stage state is command-tracked (v1.3.0). On a disconnected
-        # driver we cannot vouch for the carriage so we override to
-        # "unknown" regardless of the last commanded position — the
-        # next /control/startup leaves it "unknown" until the operator
-        # explicitly homes.
-        stage_component_state = self._stage_state if connected else "unknown"
+        # Stage state is command-tracked (v1.3.0). It is snapshotted with
+        # the rest of the in-memory state; on a disconnected driver we
+        # cannot vouch for the carriage at all, and that path returned
+        # `requires_init` above.
+        stage_component_state = stage_state
 
         components: dict[str, ComponentStatus] = {
             "sealer": ComponentStatus(
@@ -935,54 +1331,88 @@ class PlateLocService:
         # workflow can render the delta meaningfully without guessing.
         details["temperature_tolerance_c"] = self._temp_tolerance_c
 
+        # ---- activity (v1.2 §2.3) ----------------------------------------
+        # Observed from the seal-cycle state machine — `_busy_state` is true
+        # for exactly the span of the blocking `StartCycle` COM call — never
+        # derived from `equipment_status`. The Agilent control exposes no
+        # "cycle in progress" query, so this is command-tracked, the same
+        # mechanism the stage position uses. Consequence: a process restart
+        # in the middle of a cycle reports `idle`; the window is the length
+        # of one cycle (<= 12 s).
+        activity = "running" if busy else "idle"
+        # Reconcile the stored span. The transition itself is stamped by
+        # start_cycle / stop_cycle / startup / shutdown; this only catches a
+        # value the mutators never saw. Skipped when the snapshot has already
+        # been overtaken by a concurrent transition — that mutator owns the
+        # stamp and we must not overwrite it with a stale observation.
+        if busy == self._busy_state:
+            self._note_activity(activity)
+        if cycle_started_at is not None:
+            details["cycle_started_at"] = cycle_started_at.isoformat()
+        if readings_stale and readings_at is not None:
+            # Be explicit that the instrument values are the last observation
+            # rather than a fresh read (the metric timestamps say so too).
+            details["readings_as_of"] = readings_at.isoformat()
+
         # ---- top-level equipment_status ----------------------------------
+        # Health first (§2.2), activity second (§2.3): a cycle in flight no
+        # longer masks an active fault. Pre-v1.2 `busy` was tested before the
+        # error/readback branches, so a fault that landed mid-cycle was
+        # invisible until the cycle ended.
         if self.dry_run:
             state: str = "dry_run"
-            message: str | None = "Dry-run mode - no hardware connected"
             details["dry_run"] = True
-        elif self._busy_state:
-            state = "busy"
-            message = "Seal cycle in progress"
-        elif self._last_error is not None and (
-            (now - self._last_error.timestamp).total_seconds()
-            < _RECENT_ERROR_WINDOW_S
+            message: str | None = (
+                "[dry-run] seal cycle in progress"
+                if activity == "running"
+                else "Dry-run mode - no hardware connected"
+            )
+        elif last_error is not None and (
+            (now - last_error.timestamp).total_seconds() < _RECENT_ERROR_WINDOW_S
         ):
             state = "error"
-            message = self._last_error.message
+            message = last_error.message
         elif readback_errors:
             state = "degraded"
             message = "; ".join(readback_errors)
+            if activity == "running":
+                message += " — seal cycle continues"
+        elif activity == "running":
+            # Healthy + running ≡ `busy` (§2.3 invariant).
+            state = "busy"
+            message = "Seal cycle in progress"
         else:
             state = "ready"
             message = "Idle, ready to seal"
 
         # ---- allowed_actions ---------------------------------------------
-        # Start from the state-derived defaults, then layer the v1.2.1
-        # temperature interlock and the v1.3.0 stage interlock on top.
-        # Both gates consult the SAME helpers the /control/seal/start
-        # 412 path uses, so a workflow client trusting allowed_actions
-        # verbatim cannot round-trip into a 412 the device would have
-        # refused.
-        allowed_actions = list(_ALLOWED_ACTIONS_BY_STATE.get(state, []))
-        if state in ("ready", "dry_run"):
-            if "seal.start" in allowed_actions:
-                stage_blocks, _ = self.evaluate_stage_interlock(
-                    stage_component_state
-                )
-                temp_blocks, _ = self.evaluate_temperature_interlock(
-                    actual_f, setpoint_f
-                )
-                if stage_blocks or temp_blocks:
-                    allowed_actions.remove("seal.start")
-            # Stage move dedup: don't advertise the no-op direction.
-            # A POST to the "already there" direction is still accepted
-            # (the device treats it as a 200 no-op); we just leave it
-            # out of the advertised list so an operator UI doesn't show
-            # a redundant button.
-            if stage_component_state == "in" and "stage.in" in allowed_actions:
-                allowed_actions.remove("stage.in")
-            if stage_component_state == "out" and "stage.out" in allowed_actions:
-                allowed_actions.remove("stage.out")
+        # One pure function, fed by the SAME interlock helpers the
+        # /control/seal/start 412 path uses, so a workflow client trusting
+        # allowed_actions verbatim cannot round-trip into a 412 the device
+        # would have refused (§6.2).
+        stage_blocks, _ = self.evaluate_stage_interlock(stage_component_state)
+        health_blocks, _ = self.evaluate_health_interlock(last_error)
+        temp_blocks, _ = self.evaluate_temperature_interlock(actual_f, setpoint_f)
+        allowed_actions = _compute_allowed_actions(
+            state,
+            activity,
+            stage_state=stage_component_state,
+            seal_start_blocked=stage_blocks or health_blocks or temp_blocks,
+        )
+
+        # §6 diagnosis. An operational failure always wins; otherwise surface
+        # an *active* readback fault under a stable code.
+        #
+        # Deliberately computed AFTER the state decision and the gates above,
+        # which key off the operational `last_error` alone: folding a readback
+        # warning into that variable would push it through the `error` branch
+        # and through the health interlock, withholding the run for a fault
+        # that does not make sealing unsafe. `degraded` + a warning is the
+        # correct reading, and a warning here does not soften it (§2.3's
+        # prohibition on hiding a fault).
+        envelope_last_error = last_error or _readback_error_info(
+            readback_errors, now
+        )
 
         return EquipmentStatus(
             protocol_version=PROTOCOL_VERSION,
@@ -994,15 +1424,56 @@ class PlateLocService:
             equipment_status=state,  # type: ignore[arg-type]
             message=message,
             allowed_actions=allowed_actions,
+            activity=activity,  # type: ignore[arg-type]
+            activity_since=self._activity_since,
             device_time=now,
             uptime_seconds=uptime,
             components=components,
             metrics=metrics,
-            last_error=self._last_error,
+            last_error=envelope_last_error,
             details=details,
         )
 
     # ---- helpers -----------------------------------------------------------
+
+    async def _io(self, fn: Callable[..., Any], *args: Any) -> Any:
+        """Run a blocking COM transaction on a worker thread, serialised
+        through ``self._io_lock``.
+
+        Centralises the pattern so every instrument transaction in the
+        service is serialised at the COM channel: the ActiveX control is
+        single-threaded, and the 32-bit surrogate serves one request at a
+        time over its pipe. Lock ordering is always state -> io; nothing in
+        this module acquires the state lock while holding io.
+        """
+        async with self._io_lock:
+            return await asyncio.to_thread(fn, *args)
+
+    def _note_activity(self, activity: str) -> None:
+        """Record an observed activity value, stamping ``activity_since`` at
+        the instant the value changes (§2.3: the start of the CURRENT span,
+        not of the enclosing request or process)."""
+        if activity != self._activity:
+            self._activity = activity
+            self._activity_since = datetime.now(timezone.utc)
+
+    def _store_readings(
+        self,
+        readings: dict[str, Any],
+        readback_errors: list[str],
+        taken_at: datetime,
+    ) -> None:
+        self._readings = readings
+        self._readback_errors = readback_errors
+        self._readings_at = taken_at
+
+    def _last_readings(self) -> tuple[dict[str, Any], list[str], datetime | None]:
+        return dict(self._readings), list(self._readback_errors), self._readings_at
+
+    def _invalidate_readings(self) -> None:
+        self._readings = {}
+        self._readback_errors = []
+        self._readings_at = None
 
     def _driver_connected(self) -> bool:
         """Driver is connected if either flag is set. The real PlateLoc
@@ -1107,9 +1578,48 @@ class PlateLocService:
         )
 
 
+#: Instrument values folded into ``metrics``. A failed read here drives
+#: ``equipment_status: degraded`` but never fails the snapshot.
+_READ_LABELS = (
+    ("actual_temperature", "get_actual_temperature"),
+    ("setpoint_temperature", "get_sealing_temperature"),
+    ("sealing_time", "get_sealing_time"),
+    ("cycle_count", "get_cycle_count"),
+)
+
+#: Identity strings folded into ``details``.
+_INFO_LABELS = (
+    ("firmware_version", "get_firmware_version"),
+    ("activex_version", "get_version"),
+)
+
+
+def _read_driver_metrics(driver: Any) -> tuple[dict[str, Any], list[str]]:
+    """Read live driver values for the status snapshot.
+
+    Runs on a worker thread (via :meth:`PlateLocService._io`) so the
+    blocking COM transactions don't stall the event loop. Each read is
+    independently try/except'd: a failed read shows up in
+    ``readback_errors`` (driving ``equipment_status="degraded"``) but does
+    not abort the snapshot — ``/status`` must stay a 200.
+    """
+    readings: dict[str, Any] = {}
+    readback_errors: list[str] = []
+    for label, attr in _READ_LABELS + _INFO_LABELS:
+        try:
+            readings[label] = getattr(driver, attr)()
+        except Exception as exc:
+            readback_errors.append(f"{label}: {exc}")
+    com_port = getattr(driver, "com_port", None)
+    if com_port:
+        readings["com_port"] = com_port
+    return readings, readback_errors
+
+
 __all__ = [
     "LAST_ERROR_CODES",
     "PlateLocService",
+    "RecentFailureNotCleared",
     "StageNotLoaded",
     "TemperatureOutOfBand",
     "_StubPlateLoc",

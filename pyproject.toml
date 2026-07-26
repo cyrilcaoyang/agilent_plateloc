@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "agilent-plateloc-server"
-version = "1.3.2"
-description = "Python driver and REST API for the Agilent PlateLoc Thermal Microplate Sealer (lab status spec v1.1)"
+version = "1.4.0"
+description = "Python driver and REST API for the Agilent PlateLoc Thermal Microplate Sealer (lab status spec v1.2)"
 readme = "README.md"
 authors = [
     { name = "Yang Cao", email = "cyrilcaoyang@gmail.com" },
@@ -17,6 +17,7 @@ dependencies = [
     # Windows-only deps - the ActiveX control + COM surrogate only run on Windows.
     "pyserial>=3.5; sys_platform == 'win32'",
     "pywin32>=306; sys_platform == 'win32'",
+    "sdl-lab-contract",
 ]
 
 [project.optional-dependencies]
@@ -39,3 +40,6 @@ agilent-plateloc-serve = "agilent_plateloc_server.__main__:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.uv.sources]
+sdl-lab-contract = { git = "https://github.com/AccelerationConsortium/sdl-lab-contract", tag = "v1.2.0" }
