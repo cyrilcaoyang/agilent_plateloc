@@ -1,5 +1,31 @@
 # Changelog
 
+## v1.5.0 — boot-time auto-connect retry
+
+A PC restart on 2026-07-31 started the service before the USB serial
+adapter had enumerated; the single auto-connect attempt failed
+(`profile_not_found`: "Communication failed - Could not open") and the
+device sat in `requires_init` for two days until an operator reconnected
+it.
+
+The lifespan now spawns a background task when the initial connect
+fails, retrying `service.startup()` every
+`[service].startup_retry_interval_s` seconds (default 30.0; `0`
+disables). Semantics:
+
+* The retry stops **permanently at the first successful connect** —
+  its own or an operator's `POST /control/startup` — so a deliberate
+  `POST /control/shutdown` is never fought by a lingering reconnect.
+* A successful retry clears the recorded init failure from
+  `last_error`, mirroring the §6.4 auto-clear an operator-driven
+  startup gets from the API layer.
+* No change to any endpoint or to the wire envelope; `requires_init`
+  reporting during the outage is unchanged.
+
+Also adds `PlateLocService.connected` (public read-only), and
+`create_app(service=..., startup_retry_interval_s=...)` injection
+parameters for tests.
+
 ## v1.4.0 — lab status spec v1.2 (`activity`, `cycles_total`)
 
 `protocol_version` is now `"1.2"` on `/` and `/status`. Additive on the

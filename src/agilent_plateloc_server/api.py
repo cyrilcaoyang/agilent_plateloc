@@ -47,7 +47,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from typing import Annotated, Any
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Request, Response
@@ -145,6 +145,8 @@ def create_app(
     enforce_claims: bool | None = None,
     enforce_temp_interlock: bool | None = None,
     enforce_stage_interlock: bool | None = None,
+    service: PlateLocService | None = None,
+    startup_retry_interval_s: float | None = None,
 ) -> FastAPI:
     """Build the FastAPI application.
 
@@ -169,6 +171,15 @@ def create_app(
         ``/control/seal/start`` returns HTTP 412 if the stage is not
         in the loaded position. Independent of
         ``enforce_temp_interlock``.
+    service:
+        Pre-built ``PlateLocService`` to serve (tests inject one with a
+        custom ``driver_factory``). ``None`` builds one from the flags
+        above.
+    startup_retry_interval_s:
+        Seconds between background retries of a failed boot auto-connect
+        (v1.5.0). ``None`` means "use the config file" (default 30.0);
+        ``0`` disables retries. The retry stops permanently at the first
+        successful connect.
     """
 
     if dry_run is None:
@@ -184,20 +195,51 @@ def create_app(
             _config.get("service", "enforce_stage_interlock", True)
         )
 
-    service = PlateLocService(
-        dry_run=dry_run,
-        enforce_claims=enforce_claims,
-        enforce_temp_interlock=enforce_temp_interlock,
-        enforce_stage_interlock=enforce_stage_interlock,
-    )
+    if service is None:
+        service = PlateLocService(
+            dry_run=dry_run,
+            enforce_claims=enforce_claims,
+            enforce_temp_interlock=enforce_temp_interlock,
+            enforce_stage_interlock=enforce_stage_interlock,
+        )
     startup_timeout = float(_config.get("service", "startup_connect_timeout_s", 15.0))
+    if startup_retry_interval_s is None:
+        startup_retry_interval_s = float(
+            _config.get("service", "startup_retry_interval_s", 30.0)
+        )
+
+    async def _auto_connect_retry() -> None:
+        # At boot the USB serial adapter can enumerate *after* this
+        # service (observed 2026-07-31: a PC restart stranded the device
+        # in requires_init for two days). Keep retrying until the first
+        # successful connect, then stop for good — a later operator
+        # /control/shutdown is deliberate and must not be fought.
+        attempt = 0
+        while True:
+            await asyncio.sleep(startup_retry_interval_s)
+            attempt += 1
+            try:
+                await asyncio.wait_for(service.startup(), timeout=startup_timeout)
+            except Exception as exc:
+                logger.info(
+                    "PlateLoc auto-connect retry %d failed: %s; retrying in %.0fs",
+                    attempt,
+                    exc,
+                    startup_retry_interval_s,
+                )
+                continue
+            service.clear_last_error_on_success()
+            logger.info("PlateLoc auto-connect retry %d succeeded", attempt)
+            return
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):  # noqa: ARG001
         # Best-effort connect on startup. If the device is unreachable
         # (powered off, COM port busy, ActiveX not registered) we log and
         # leave the service in `requires_init`; the operator can retry
-        # via POST /control/startup.
+        # via POST /control/startup, and a background task keeps retrying
+        # on its own until the first successful connect.
+        retry_task: asyncio.Task[None] | None = None
         try:
             await asyncio.wait_for(service.startup(), timeout=startup_timeout)
             logger.info("PlateLoc auto-connect succeeded")
@@ -208,9 +250,15 @@ def create_app(
             )
         except Exception as exc:
             logger.warning("PlateLoc auto-connect failed: %s", exc)
+        if not service.connected and startup_retry_interval_s > 0:
+            retry_task = asyncio.create_task(_auto_connect_retry())
         try:
             yield
         finally:
+            if retry_task is not None and not retry_task.done():
+                retry_task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await retry_task
             # Defensive: drop any active claim before tearing the driver
             # down so a crashed orchestrator cannot prevent the next
             # process restart from accepting a fresh claim.

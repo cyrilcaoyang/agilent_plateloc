@@ -1513,3 +1513,92 @@ def test_save_status_fixtures(unclaimed_client: TestClient, scrub) -> None:
     (FIXTURES / "status_requires_init.json").write_text(
         json.dumps(scrub(body), indent=2, sort_keys=True) + "\n"
     )
+
+
+# ---------------------------------------------------------------------------
+# Boot-time auto-connect retry (v1.5.0)
+# ---------------------------------------------------------------------------
+
+
+def _flaky_connect_factory(failures: int):
+    """Driver factory whose ``connect`` fails ``failures`` times, then works.
+
+    Models the 2026-07-31 boot race: the USB serial adapter enumerates
+    *after* the service process starts, so the first Initialize attempt(s)
+    fail exactly the way the real driver failed (``profile_not_found`` /
+    "Communication failed - Could not open").
+    """
+    from agilent_plateloc_server.service import _StubPlateLoc
+
+    calls = {"n": 0}
+
+    class _FlakyStub(_StubPlateLoc):
+        def connect(self, profile: str | None = None) -> None:
+            calls["n"] += 1
+            if calls["n"] <= failures:
+                raise RuntimeError(
+                    "Initialize('sdl2') failed: Communication failed - Could not open"
+                )
+            super().connect(profile)
+
+    return _FlakyStub
+
+
+def _wait_for_leaving(client: TestClient, state: str, timeout_s: float = 5.0) -> str:
+    import time
+
+    deadline = time.monotonic() + timeout_s
+    status = client.get("/status").json()["equipment_status"]
+    while status == state and time.monotonic() < deadline:
+        time.sleep(0.05)
+        status = client.get("/status").json()["equipment_status"]
+    return status
+
+
+def test_auto_connect_retry_recovers_from_boot_race() -> None:
+    """A driver that enumerates late is picked up by the background retry,
+    and the recorded init failure is cleared once the connect succeeds."""
+    from agilent_plateloc_server.api import create_app
+
+    app = create_app(
+        dry_run=False, enforce_claims=False, startup_retry_interval_s=0.05
+    )
+    app.state.service._driver_factory = _flaky_connect_factory(2)
+    with TestClient(app) as alt:
+        assert _wait_for_leaving(alt, "requires_init") == "ready"
+        assert alt.get("/status").json()["last_error"] is None
+
+
+def test_auto_connect_retry_disabled_by_zero_interval() -> None:
+    import time
+
+    from agilent_plateloc_server.api import create_app
+
+    app = create_app(
+        dry_run=False, enforce_claims=False, startup_retry_interval_s=0.0
+    )
+    app.state.service._driver_factory = _flaky_connect_factory(999)
+    with TestClient(app) as alt:
+        time.sleep(0.3)
+        s = alt.get("/status").json()
+        assert s["equipment_status"] == "requires_init"
+        assert s["last_error"] is not None
+
+
+def test_auto_connect_retry_stops_after_first_success() -> None:
+    """The retry ends for good at the first successful connect: a later
+    operator /control/shutdown must not be fought by a lingering task."""
+    import time
+
+    from agilent_plateloc_server.api import create_app
+
+    app = create_app(
+        dry_run=False, enforce_claims=False, startup_retry_interval_s=0.05
+    )
+    app.state.service._driver_factory = _flaky_connect_factory(1)
+    with TestClient(app) as alt:
+        assert _wait_for_leaving(alt, "requires_init") == "ready"
+        r = alt.post("/control/shutdown")
+        assert r.status_code == 200
+        time.sleep(0.3)  # several retry intervals
+        assert alt.get("/status").json()["equipment_status"] == "requires_init"

@@ -605,6 +605,15 @@ class PlateLocService:
 
         return PlateLoc()
 
+    @property
+    def connected(self) -> bool:
+        """True once the driver is attached and reports connected.
+
+        A failed ``startup`` keeps ``self._driver`` around for retries,
+        so driver presence alone is not connection.
+        """
+        return self._driver_connected()
+
     async def startup(self, profile: str | None = None) -> None:
         """Create (or reuse) the driver and connect.
 

@@ -283,6 +283,13 @@ port = 8000
 dry_run = false           # true = run without ActiveX/COM (CI, dev)
 cors_origins = ["*"]      # tighten if device leaves the Tailnet
 startup_connect_timeout_s = 15.0
+startup_retry_interval_s = 30.0
+                          # v1.5.0: retry a failed boot auto-connect every
+                          # N s until the first successful connect (USB
+                          # serial can enumerate after the service at
+                          # boot). 0 disables. The retry stops permanently
+                          # at the first success, so a deliberate
+                          # /control/shutdown is never fought.
 enforce_claims = true     # v1.1: require X-Claim-Token on /control/*
                           # set false for advisory mode (publishes
                           # claimed_by but doesn't block writes)
