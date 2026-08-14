@@ -1,5 +1,27 @@
 # Changelog
 
+## v1.6.0 — boot setpoint applied on connect
+
+The PlateLoc reverts to the setpoint stored at its own front panel
+whenever the instrument power-cycles (160 C on this unit), so any
+reboot left the heater driving toward a hot standby nobody asked for —
+the service never wrote a temperature at startup.
+
+`startup()` now applies `[instrument].boot_setpoint_c` (new config key,
+default **40 C**; `0` disables) after every successful connect: the
+boot auto-connect, its v1.5.0 retry loop, and operator
+`POST /control/startup` all take the same path. Semantics:
+
+* The write is **best-effort**: a failed setpoint write logs a warning
+  and the instrument keeps its own setpoint — a successful connect is
+  never turned into `requires_init` by it.
+* Workflow behaviour is unchanged: `seal/start` still sets its own
+  requested temperature, and the §6 temperature interlock still refuses
+  `seal.start` until actual is within band of whatever setpoint is
+  current.
+* Snapshot fixtures regenerate with the 40 C idle setpoint where the
+  old stub default (170 C) used to show through; schema unchanged.
+
 ## v1.5.0 — boot-time auto-connect retry
 
 A PC restart on 2026-07-31 started the service before the USB serial

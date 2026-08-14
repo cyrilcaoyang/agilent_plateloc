@@ -294,6 +294,15 @@ enforce_claims = true     # v1.1: require X-Claim-Token on /control/*
                           # set false for advisory mode (publishes
                           # claimed_by but doesn't block writes)
 
+[instrument]
+boot_setpoint_c = 40      # v1.6.0: setpoint (C) applied after every
+                          # successful connect (boot auto-connect + retry,
+                          # operator /control/startup). The instrument
+                          # reverts to its own front-panel default (160 C)
+                          # on power-cycle; this write keeps the heater at
+                          # a cool idle instead. Best-effort — a failed
+                          # write never blocks the connect. 0 disables.
+
 [dashboard]
 equipment_id = "plateloc"          # MUST match equipment.yaml in the dashboard
 equipment_name = "Agilent PlateLoc"

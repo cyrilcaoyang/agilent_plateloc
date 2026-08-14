@@ -91,6 +91,13 @@ _DEFAULTS: dict[str, Any] = {
     "instrument": {
         "com_port": "COM14",
         "profile": "default",
+        # Sealing setpoint (C) applied after every successful connect —
+        # boot auto-connect, its retry loop, and operator /control/startup.
+        # The instrument reverts to its own front-panel default (160 C on
+        # this unit) whenever it power-cycles; this key overrides that
+        # with a cool idle setpoint so a reboot never leaves the heater
+        # driving toward 160 C unattended. 0 disables the write.
+        "boot_setpoint_c": 40,
     },
     "activex": {
         "progid": "PLATELOC.PlateLocCtrl.2",

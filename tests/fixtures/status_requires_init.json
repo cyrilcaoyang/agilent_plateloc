@@ -11,7 +11,7 @@
   "equipment_kind": "plate_sealer",
   "equipment_name": "Agilent PlateLoc",
   "equipment_status": "requires_init",
-  "equipment_version": "1.5.0",
+  "equipment_version": "1.6.0",
   "host": "plateloc-pc",
   "last_error": null,
   "message": "Driver not connected. POST /control/startup to initialize.",

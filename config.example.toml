@@ -7,6 +7,13 @@
 [instrument]
 com_port = "COM14"                          # Serial port the PlateLoc is on
 profile = "default"                         # Profile name created in Diagnostics dialog
+boot_setpoint_c = 40                        # Setpoint (C) applied after every successful
+                                            # connect (boot auto-connect + retry, and
+                                            # operator /control/startup). Overrides the
+                                            # instrument's own power-on default (stored at
+                                            # its front panel; 160 C from the factory) so a
+                                            # reboot never leaves the heater driving toward
+                                            # a hot standby. 0 disables the write.
 
 [activex]
 progid = "PLATELOC.PlateLocCtrl.2"          # ActiveX ProgID for the PlateLoc control

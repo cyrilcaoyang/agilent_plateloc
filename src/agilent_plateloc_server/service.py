@@ -579,6 +579,16 @@ class PlateLocService:
             _config.get("film", "temperature_tolerance_c", 2)
         )
 
+        # Setpoint applied after every successful connect (v1.6.0). The
+        # instrument reverts to its own front-panel default whenever it
+        # power-cycles (160 C on this unit), so without this write a
+        # reboot leaves the heater driving toward a hot standby nobody
+        # asked for. ``0`` / falsy disables.
+        _boot_setpoint = _config.get("instrument", "boot_setpoint_c", 40)
+        self._boot_setpoint_c: int | None = (
+            int(_boot_setpoint) if _boot_setpoint else None
+        )
+
         # Identity (configurable so a deployment can override).
         self.equipment_id: str = _config.get("dashboard", "equipment_id", "plateloc")
         self.equipment_name: str = _config.get(
@@ -642,6 +652,22 @@ class PlateLocService:
                 self._record_error(exc, "startup", detail=detail)
                 # keep self._driver around so retries reuse the same instance
                 raise
+            if self._boot_setpoint_c is not None:
+                # Best-effort: the connect succeeded, so a failed setpoint
+                # write must not strand the service in requires_init. The
+                # instrument just keeps whatever setpoint it woke up with.
+                try:
+                    await self._io(
+                        self._driver.set_sealing_temperature,
+                        self._boot_setpoint_c,
+                    )
+                except Exception:
+                    logger.warning(
+                        "Connected, but applying boot setpoint %d C failed; "
+                        "instrument keeps its own setpoint",
+                        self._boot_setpoint_c,
+                        exc_info=True,
+                    )
             self._invalidate_readings()
             # A freshly connected sealer is not cycling (§2.3 pins
             # requires_init ⇒ idle; this is the transition out of it).

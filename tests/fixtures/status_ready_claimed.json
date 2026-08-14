@@ -13,7 +13,7 @@
     "heater": {
       "connected": true,
       "last_event_at": null,
-      "message": "At setpoint (170 C)",
+      "message": "At setpoint (40 C)",
       "state": "stable"
     },
     "sealer": {
@@ -45,7 +45,7 @@
   "equipment_kind": "plate_sealer",
   "equipment_name": "Agilent PlateLoc",
   "equipment_status": "ready",
-  "equipment_version": "1.5.0",
+  "equipment_version": "1.6.0",
   "host": "plateloc-pc",
   "last_error": null,
   "message": "Idle, ready to seal",
@@ -53,7 +53,7 @@
     "actual_temperature": {
       "timestamp": "2026-04-29T22:50:01Z",
       "unit": "C",
-      "value": 170
+      "value": 40
     },
     "cycle_count": {
       "timestamp": null,
@@ -73,7 +73,7 @@
     "setpoint_temperature": {
       "timestamp": "2026-04-29T22:50:01Z",
       "unit": "C",
-      "value": 170
+      "value": 40
     },
     "temperature_delta_c": {
       "timestamp": "2026-04-29T22:50:01Z",

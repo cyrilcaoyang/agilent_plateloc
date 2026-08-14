@@ -44,7 +44,7 @@
   "equipment_kind": "plate_sealer",
   "equipment_name": "Agilent PlateLoc",
   "equipment_status": "ready",
-  "equipment_version": "1.5.0",
+  "equipment_version": "1.6.0",
   "host": "plateloc-pc",
   "last_error": null,
   "message": "Idle, ready to seal",

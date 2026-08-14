@@ -321,6 +321,27 @@ def _build_claimed_client(
     return c, driver
 
 
+def test_startup_applies_boot_setpoint() -> None:
+    """Every successful connect overwrites the instrument's own power-on
+    setpoint (160 C stored at its front panel) with
+    ``[instrument].boot_setpoint_c`` (default 40 C), so a reboot never
+    leaves the heater driving toward a hot standby (v1.6.0)."""
+    c, driver = _build_claimed_client(enforce_temp_interlock=True)
+    try:
+        assert driver._set_temp == 40
+        body = c.get("/status").json()
+        assert body["metrics"]["setpoint_temperature"]["value"] == 40
+
+        # An operator shutdown -> startup round trip re-applies it. The
+        # service builds a fresh driver on reconnect, whose stub default
+        # (170) stands in for the instrument reverting on power-cycle.
+        c.post("/control/shutdown")
+        c.post("/control/startup", json={})
+        assert c.app.state.service._driver._set_temp == 40
+    finally:
+        c.__exit__(None, None, None)
+
+
 def test_seal_start_in_band_succeeds() -> None:
     """Heater at setpoint -> cycle accepted with HTTP 200."""
     c, driver = _build_claimed_client(enforce_temp_interlock=True)
@@ -575,7 +596,8 @@ def test_last_error_preserved_on_412_refusal() -> None:
         original_message = body["last_error"]["message"]
 
         # _build_claimed_client startup() already snaps _actual_temp to
-        # _set_temp=170; drag actual below band without a 2xx round trip.
+        # the boot setpoint (40 C, v1.6.0); drag actual out of band
+        # without a 2xx round trip.
         driver._actual_temp = 150
         r = c.post("/control/seal/start", json={"seconds": 3.0})
         assert r.status_code == 412
